@@ -3,6 +3,10 @@
 A pixel-art crab that lives in the corner of your desktop and shows what
 Claude is doing — so you don't have to keep the terminal open.
 
+> ⚠️ **Windows only.** The crab relies on Win32 APIs (always-on-top window
+> layering, transparent-color keying), `winsound` for the chime, and a
+> PowerShell installer. It does **not** run on macOS or Linux.
+
 ## Install
 
 Run `install.ps1` (right-click → "Run with PowerShell"). It checks Python,
@@ -87,7 +91,7 @@ To broaden the gate to other tools, change `"matcher": "Bash"` in your
 
 ## Requirements
 
-- Windows 10 / 11
+- **Windows 10 / 11 only** — not compatible with macOS or Linux
 - Python 3.8+ (any modern install)
 - Pillow (the installer pip-installs it)
 - Claude Code
