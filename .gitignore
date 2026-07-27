@@ -1,0 +1,19 @@
+# Runtime state — private to each machine (session ids, transcript-derived
+# labels, positions, permission decisions, logs). Never commit these.
+state/
+
+# Python
+__pycache__/
+*.pyc
+
+# Custom sprite overrides a user drops in (their own art, not the project's)
+crab_*.png
+crab_*.gif
+dragon_*.png
+dragon_*.gif
+
+# Editor / OS cruft
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
