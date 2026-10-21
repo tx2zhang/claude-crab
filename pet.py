@@ -31,6 +31,17 @@ except ImportError:
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
+# Optional companions living next to pet.py: the vector crow character and
+# the local usage stats behind the click-to-open usage panel.
+try:
+    import crow as crow_art
+except Exception:
+    crow_art = None
+try:
+    import usage as usage_stats
+except Exception:
+    usage_stats = None
+
 ROOT = Path(os.path.expanduser("~/.claude/pet"))
 STATE_DIR = ROOT / "state"
 SESSIONS_DIR = STATE_DIR / "sessions"
@@ -58,11 +69,14 @@ SESSION_NAMES_FILE = STATE_DIR / "session_names.json"
 #   pet.py --dragon <id>    → dragon duplicate with instance ID <id>
 THEME = "crab"
 INSTANCE_ID = "default"
+CHARACTER_ARG = None   # --crow starts as the crow regardless of saved choice
 for _arg in sys.argv[1:]:
     if _arg in ("--dragon", "-D"):
         THEME = "dragon"
     elif _arg in ("--crab", "-C"):
         THEME = "crab"
+    elif _arg == "--crow":
+        CHARACTER_ARG = "crow"
     elif not _arg.startswith("-"):
         INSTANCE_ID = _arg
 
@@ -198,6 +212,34 @@ def play_chime(kind="cheer"):
 TRANSPARENT_KEY = "#ff00ff"
 TAG_BG = "#2b2b30"
 TAG_FG = "#f0f0f0"
+
+# Apple-style "frosted glass" look for the popup notifications (permission
+# bubble, MCP reauth, toast, mood blurb): a cool translucent card with a
+# hairline light edge, a bright top sheen, rounded corners, and real
+# window translucency.
+GLASS_FILL   = "#30333c"   # frosted dark slate (card body)
+GLASS_BORDER = "#5f6675"   # soft light hairline edge
+GLASS_SHEEN  = "#808799"   # brighter highlight along the top edge
+GLASS_FG     = "#f3f4f6"   # primary text
+GLASS_FG_DIM = "#a8aeba"   # secondary text
+GLASS_RADIUS = 16          # corner radius (px)
+GLASS_ALPHA  = 0.90        # window translucency (standalone popups + pills)
+# Crisp UI font for glass text. Tahoma hints far sharper than Segoe at small
+# sizes on layered (transparent) windows, which only get grayscale AA.
+GLASS_FONT   = "Tahoma"
+GLASS_PAD    = 12          # inset between the card edge and its content
+PILL_PAD_X   = 12          # pill card horizontal inset
+PILL_PAD_Y   = 5           # pill card vertical inset
+PILL_RADIUS  = 11          # pill corner radius (smaller than popups)
+
+
+def _round_rect_points(x1, y1, x2, y2, r):
+    """Corner points for a rounded rectangle, drawn via a smoothed polygon."""
+    return [
+        x1 + r, y1,  x2 - r, y1,  x2, y1,  x2, y1 + r,
+        x2, y2 - r,  x2, y2,  x2 - r, y2,  x1 + r, y2,
+        x1, y2,  x1, y2 - r,  x1, y1 + r,  x1, y1,
+    ]
 
 STATE_LOOKS = {
     "idle":       ("idle",         "#bbbbbb"),
@@ -1005,21 +1047,16 @@ class CrabPet:
             pass
         self.root.configure(bg=TRANSPARENT_KEY)
 
-        self.standing_tk = ImageTk.PhotoImage(crab_image(STANDING))
-        self.dangle_tks = [ImageTk.PhotoImage(crab_image(f)) for f in DANGLE_FRAMES]
-        self.typing_tks = [ImageTk.PhotoImage(crab_image(f)) for f in TYPING_FRAMES]
-        self.cheer_tks = [ImageTk.PhotoImage(crab_image(f)) for f in CHEER_FRAMES]
-        self.hop_tks = [ImageTk.PhotoImage(crab_image(f)) for f in HOP_FRAMES]
-        self.sleeping_tks = [
-            ImageTk.PhotoImage(crab_image(SLEEPING_BODY, zs=zs))
-            for zs in SLEEPING_Z_FRAMES
-        ]
+        # User preferences (chime, character, etc.).
+        self.settings = load_settings()
 
-        # Custom PNG overrides — drop e.g. ~/.claude/pet/dragon_standing.png and
-        # it'll be used instead of the hand-coded sprite for that state.
-        # Filenames: <theme>_<state>.png  (states: standing, typing, sleeping,
-        # cheer, dangle). Any missing state falls back to the built-in sprite.
-        self._apply_png_overrides()
+        # Which character this instance shows: the base theme (crab/dragon)
+        # or the vector crow. Saved per instance so a duplicate can differ.
+        self._char_key = f"character:{THEME}:{INSTANCE_ID}"
+        self.character = CHARACTER_ARG or self.settings.get(self._char_key) or THEME
+        if self.character == "crow" and crow_art is None:
+            self.character = THEME
+        self._load_character(self.character)
 
         self._anim_after = None
         self._anim_frames = None
@@ -1030,9 +1067,22 @@ class CrabPet:
         self.frame = tk.Frame(self.root, bg=TRANSPARENT_KEY)
         self.frame.pack()
 
-        # Pill stack — one pill per session.
-        self.pill_frame = tk.Frame(self.frame, bg=TRANSPARENT_KEY)
-        self.pill_frame.pack(pady=(0, 2))
+        # Pill stack lives in its OWN translucent window floating above the
+        # crab, so the pills can be see-through glass while the crab stays
+        # fully solid (window alpha is per-window). Positioned each tick.
+        self.pill_window = tk.Toplevel(self.root)
+        self.pill_window.overrideredirect(True)
+        self.pill_window.attributes("-topmost", True)
+        try:
+            self.pill_window.attributes("-transparentcolor", TRANSPARENT_KEY)
+            self.pill_window.attributes("-alpha", GLASS_ALPHA)
+        except tk.TclError:
+            pass
+        self.pill_window.configure(bg=TRANSPARENT_KEY)
+        self.pill_frame = tk.Frame(self.pill_window, bg=TRANSPARENT_KEY)
+        self.pill_frame.pack()
+        self.pill_window.withdraw()
+        self._pill_window_visible = False
         self.pills = {}      # label -> {frame, label, sids, state}
         self.sessions = {}   # session_id -> {state, ts, label, transcript}
 
@@ -1092,8 +1142,6 @@ class CrabPet:
         self._claude_launcher_cache = None
         self._claude_launcher_discovered = False
 
-        # User preferences (chime, etc.).
-        self.settings = load_settings()
 
         # Mood emote — floating Toplevel positioned to the right of the crab,
         # so it doesn't push the pill stack around.
@@ -1132,6 +1180,18 @@ class CrabPet:
         self._mcp_current_server = None
         self._build_mcp_bubble()
 
+        # Usage panel (click the pet). Stats come from local transcripts;
+        # warm the index in the background so the first click is instant.
+        self._usage_window = self._usage_canvas = None
+        self._usage_visible = False
+        self._usage_opened_at = self._usage_closed_at = 0.0
+        self._usage_tick_after = None
+        self._usage_stats = None
+        self._usage_index = None
+        self._usage_lock = threading.Lock()
+        if usage_stats is not None:
+            threading.Thread(target=self._usage_refresh_worker, daemon=True).start()
+
         self.root.update_idletasks()
         self.load_position()
 
@@ -1142,64 +1202,78 @@ class CrabPet:
         self.poll()
         self._topmost_loop()
 
+    # ---------- frosted-glass helpers ----------
+
+    def _draw_glass(self, canvas, w, h, radius=GLASS_RADIUS, fill=GLASS_FILL):
+        """Paint the frosted-glass card (rounded fill + hairline edge + top
+        sheen) onto a canvas, tagged "glass" and tucked behind the content."""
+        canvas.delete("glass")
+        r = radius
+        canvas.create_polygon(
+            _round_rect_points(1, 1, w - 1, h - 1, r), smooth=True,
+            fill=fill, outline=GLASS_BORDER, width=1, tags="glass",
+        )
+        # Bright sheen just inside the top edge — the "glass" catch-light.
+        canvas.create_line(r, 2, w - r, 2, fill=GLASS_SHEEN, width=1, tags="glass")
+        canvas.tag_lower("glass")
+
+    def _glass_wrap(self, parent):
+        """Create a glass canvas + a content frame floating on it. Returns
+        (canvas, content). Call _glass_refit after filling the content."""
+        canvas = tk.Canvas(parent, bg=TRANSPARENT_KEY, highlightthickness=0, bd=0)
+        content = tk.Frame(canvas, bg=GLASS_FILL)
+        canvas._content_item = canvas.create_window(
+            GLASS_PAD, GLASS_PAD, anchor="nw", window=content)
+        return canvas, content
+
+    def _glass_refit(self, canvas, content):
+        """Resize the canvas to the content and repaint the glass card."""
+        content.update_idletasks()
+        w = content.winfo_reqwidth() + GLASS_PAD * 2
+        h = content.winfo_reqheight() + GLASS_PAD * 2
+        canvas.configure(width=w, height=h)
+        canvas.coords(canvas._content_item, GLASS_PAD, GLASS_PAD)
+        self._draw_glass(canvas, w, h)
+
+    def _glass_button(self, parent, text, fill, active, command):
+        """A flat, Apple-ish filled button that sits on the glass."""
+        return tk.Button(
+            parent, text=text, command=command,
+            bg=fill, fg="white", activebackground=active, activeforeground="white",
+            relief="flat", bd=0, font=("Segoe UI", 9), cursor="hand2",
+            padx=14, pady=5,
+        )
+
     # ---------- speech bubble ----------
 
     def _build_bubble(self):
         self.bubble_frame = tk.Frame(self.frame, bg=TRANSPARENT_KEY)
-
-        self.bubble_body = tk.Frame(self.bubble_frame, bg=TAG_BG, padx=10, pady=6)
-        self.bubble_body.pack()
+        self.bubble_canvas, self.bubble_body = self._glass_wrap(self.bubble_frame)
+        self.bubble_canvas.pack()
 
         self.bubble_title = tk.Label(
-            self.bubble_body,
-            text="allow ?",
-            bg=TAG_BG,
-            fg=TAG_FG,
-            font=("Segoe UI", 9, "bold"),
+            self.bubble_body, text="allow ?",
+            bg=GLASS_FILL, fg=GLASS_FG, font=("Segoe UI", 10, "bold"),
         )
-        self.bubble_title.pack()
+        self.bubble_title.pack(anchor="w")
 
         self.bubble_detail = tk.Label(
-            self.bubble_body,
-            text="",
-            bg=TAG_BG,
-            fg="#aaaaaa",
-            font=("Consolas", 8),
-            wraplength=180,
-            justify="left",
+            self.bubble_body, text="",
+            bg=GLASS_FILL, fg=GLASS_FG_DIM, font=("Consolas", 8),
+            wraplength=190, justify="left",
         )
-        self.bubble_detail.pack(pady=(2, 0))
+        self.bubble_detail.pack(anchor="w", pady=(3, 0))
 
-        btn_row = tk.Frame(self.bubble_body, bg=TAG_BG)
-        btn_row.pack(pady=(6, 0))
-        tk.Button(
-            btn_row, text="Yes", command=lambda: self.respond("allow"),
-            bg="#3fa54f", fg="white", activebackground="#54c265",
-            relief="flat", bd=0, font=("Segoe UI", 8, "bold"),
-            padx=8, pady=2,
-        ).pack(side="left", padx=2)
-        tk.Button(
-            btn_row, text="Always", command=lambda: self.respond("always"),
-            bg="#3766c6", fg="white", activebackground="#4a7be0",
-            relief="flat", bd=0, font=("Segoe UI", 8, "bold"),
-            padx=8, pady=2,
-        ).pack(side="left", padx=2)
-        tk.Button(
-            btn_row, text="No", command=lambda: self.respond("deny"),
-            bg="#c63838", fg="white", activebackground="#e04848",
-            relief="flat", bd=0, font=("Segoe UI", 8, "bold"),
-            padx=8, pady=2,
-        ).pack(side="left", padx=2)
+        btn_row = tk.Frame(self.bubble_body, bg=GLASS_FILL)
+        btn_row.pack(pady=(10, 0))
+        self._glass_button(btn_row, "Yes", "#30d158", "#43dd68",
+                           lambda: self.respond("allow")).pack(side="left", padx=(0, 6))
+        self._glass_button(btn_row, "Always", "#0a84ff", "#2a97ff",
+                           lambda: self.respond("always")).pack(side="left", padx=(0, 6))
+        self._glass_button(btn_row, "No", "#48484a", "#5a5a5c",
+                           lambda: self.respond("deny")).pack(side="left")
 
-        self.bubble_tail = tk.Canvas(
-            self.bubble_frame, width=24, height=10,
-            bg=TRANSPARENT_KEY, highlightthickness=0, bd=0,
-        )
-        self.bubble_tail.create_polygon(
-            4, 0, 20, 0, 12, 9,
-            fill=TAG_BG, outline=TAG_BG,
-        )
-        self.bubble_tail.pack()
+        self._glass_refit(self.bubble_canvas, self.bubble_body)
 
     def show_bubble(self, pending):
         sig = json.dumps(pending, sort_keys=True)
@@ -1208,8 +1282,11 @@ class CrabPet:
             self.pending_signature = sig
             self.bubble_title.config(text=f"allow {tool}?")
             self.bubble_detail.config(text=self._summarize(pending))
+            self._glass_refit(self.bubble_canvas, self.bubble_body)
         if not self.bubble_visible:
-            self.pill_frame.pack_forget()
+            # Hide the floating pill window while the permission bubble (inline
+            # in the crab window) takes over.
+            self._hide_pill_window()
             self.bubble_frame.pack(before=self.crab_label, pady=(0, 1))
             self.bubble_visible = True
             self._reanchor()
@@ -1217,9 +1294,9 @@ class CrabPet:
     def hide_bubble(self):
         if self.bubble_visible:
             self.bubble_frame.pack_forget()
-            self.pill_frame.pack(before=self.crab_label, pady=(0, 2))
             self.bubble_visible = False
             self._reanchor()
+            self._update_pill_window()  # bring the pills back
         self.pending_signature = None
 
     def _summarize(self, pending):
@@ -1328,29 +1405,37 @@ class CrabPet:
             display = f"{g['name']} · {label_text}"
 
             if key in self.pills:
-                self.pills[key]["label"].config(text=display, fg=color)
-                self.pills[key]["sids"] = g["sids"]
-                self.pills[key]["state"] = state
-                self.pills[key]["name"] = g["name"]
+                p = self.pills[key]
+                if p["label"].cget("text") != display:
+                    p["label"].config(text=display, fg=color)
+                    self._refit_pill(p)
+                else:
+                    p["label"].config(fg=color)
+                p["sids"] = g["sids"]
+                p["state"] = state
+                p["name"] = g["name"]
             else:
                 self.pills[key] = self._make_pill(key, display, color, g["sids"])
                 self.pills[key]["state"] = state
                 self.pills[key]["name"] = g["name"]
 
     def _make_pill(self, label_key, display, color, sids):
-        """Build a pill. The delete button is a separate floating Toplevel
-        shown on hover — keeps the pill compact and unaffected by hover state."""
-        frame = tk.Frame(self.pill_frame, bg=TAG_BG)
-        frame.pack(pady=1)
+        """Build a frosted-glass pill — a rounded, hairline-edged card drawn
+        on a canvas with the status label floating on top. The delete button
+        is a separate floating Toplevel shown on hover."""
+        frame = tk.Frame(self.pill_frame, bg=TRANSPARENT_KEY)
+        frame.pack(pady=2)
 
+        canvas = tk.Canvas(frame, bg=TRANSPARENT_KEY, highlightthickness=0, bd=0)
+        canvas.pack()
         label_widget = tk.Label(
-            frame, text=display, bg=TAG_BG, fg=color,
-            font=("Segoe UI", 9, "bold"),
-            padx=10, pady=3, bd=0,
+            canvas, text=display, bg=GLASS_FILL, fg=color,
+            font=(GLASS_FONT, 9),
         )
-        label_widget.pack()
+        canvas._content_item = canvas.create_window(
+            PILL_PAD_X, PILL_PAD_Y, anchor="nw", window=label_widget)
 
-        for w in (frame, label_widget):
+        for w in (frame, canvas, label_widget):
             w.bind("<ButtonPress-1>", self.on_press)
             w.bind("<B1-Motion>", self.on_motion)
             w.bind("<ButtonRelease-1>", self.on_release)
@@ -1360,7 +1445,54 @@ class CrabPet:
                    add="+")
             w.bind("<Leave>", lambda _e: self._hide_delete_soon(), add="+")
 
-        return {"frame": frame, "label": label_widget, "sids": list(sids)}
+        pill = {"frame": frame, "canvas": canvas, "label": label_widget,
+                "sids": list(sids)}
+        self._refit_pill(pill)
+        return pill
+
+    def _refit_pill(self, pill, fill=GLASS_FILL):
+        """Size the pill canvas to its label and (re)paint the glass card."""
+        canvas, label = pill["canvas"], pill["label"]
+        label.update_idletasks()
+        w = label.winfo_reqwidth() + PILL_PAD_X * 2
+        h = label.winfo_reqheight() + PILL_PAD_Y * 2
+        canvas.configure(width=w, height=h)
+        canvas.coords(canvas._content_item, PILL_PAD_X, PILL_PAD_Y)
+        self._draw_glass(canvas, w, h, radius=PILL_RADIUS, fill=fill)
+
+    def _update_pill_window(self):
+        """Float the translucent pill window centered just above the crab.
+        Hidden while the permission bubble shows or when there are no pills."""
+        if self.bubble_visible or self._usage_visible or not self.pills:
+            self._hide_pill_window()
+            return
+        try:
+            self.root.update_idletasks()
+            self.pill_frame.update_idletasks()
+            pw = self.pill_frame.winfo_reqwidth()
+            ph = self.pill_frame.winfo_reqheight()
+            crab_x = self.root.winfo_x() + self.crab_label.winfo_x()
+            crab_y = self.root.winfo_y() + self.crab_label.winfo_y()
+            crab_w = self.crab_label.winfo_width()
+            x = crab_x + (crab_w - pw) // 2
+            # Keep long pill stacks fully on-screen when the pet is near an edge.
+            x = max(4, min(x, self.root.winfo_screenwidth() - pw - 4))
+            y = crab_y - ph - 4
+            self.pill_window.geometry(f"{pw}x{ph}+{x}+{y}")
+            if not self._pill_window_visible:
+                self.pill_window.deiconify()
+                self.pill_window.attributes("-topmost", True)
+                self._pill_window_visible = True
+        except Exception:
+            pass
+
+    def _hide_pill_window(self):
+        if self._pill_window_visible:
+            try:
+                self.pill_window.withdraw()
+            except Exception:
+                pass
+            self._pill_window_visible = False
 
     def _on_pill_right_click(self, e, key):
         """Pill-specific context menu: rename or dismiss this session."""
@@ -1453,6 +1585,7 @@ class CrabPet:
         self.sessions = self.load_sessions()
         self.update_pills(self.sessions)
         self._reanchor()
+        self._update_pill_window()
 
     def dismiss_label(self, label_key, sids):
         """Dismiss every session_id that this label-pill represents."""
@@ -1607,6 +1740,8 @@ class CrabPet:
         if was_dragged:
             self.save_position()
             self.update_animation()
+        elif e.widget is self.crab_label:
+            self.toggle_usage_panel()
         else:
             self.focus_or_launch_claude()
 
@@ -1622,10 +1757,18 @@ class CrabPet:
 
         clamp_item = ("Allow taskbar overlap", self.toggle_clamp_y) \
             if self.settings.get("clamp_y") else ("Lock above taskbar", self.toggle_clamp_y)
+        base_name = "dragon" if THEME == "dragon" else "crab"
+        if self.character == "crow":
+            char_item = (f"{'🐉' if THEME == 'dragon' else '🦀'} Switch to {base_name}",
+                         lambda: self._switch_character(THEME))
+        else:
+            char_item = ("🐦 Switch to crow", lambda: self._switch_character("crow"))
         items = [
             ("Open Claude", self.focus_or_launch_claude),
+            ("📊 Usage", self.toggle_usage_panel),
             ("🎉 Cheer", self._manual_cheer),
-            ("✨ Duplicate crab", self._duplicate_self),
+            char_item,
+            (f"✨ Duplicate {self.character}", self._duplicate_self),
             chime_item,
             clamp_item,
             "---",
@@ -1733,8 +1876,10 @@ class CrabPet:
         args = [exe, str(Path(__file__).resolve())]
         if THEME != "crab":
             args.append(f"--{THEME}")
+        if self.character == "crow":
+            args.append("--crow")
         args.append(new_id)
-        label = "dragon" if THEME == "dragon" else "crab"
+        label = self.character
         try:
             subprocess.Popen(args, creationflags=_NO_WINDOW)
             self.show_toast(f"✨ Spawned a new {label}")
@@ -1768,20 +1913,18 @@ class CrabPet:
         toast.attributes("-topmost", True)
         try:
             toast.attributes("-transparentcolor", TRANSPARENT_KEY)
+            toast.attributes("-alpha", GLASS_ALPHA)
         except tk.TclError:
             pass
         toast.configure(bg=TRANSPARENT_KEY)
 
-        border = tk.Frame(toast, bg="#3a3a42")
-        border.pack()
-        inner = tk.Frame(border, bg="#1f1f24")
-        inner.pack(padx=1, pady=1)
+        canvas, inner = self._glass_wrap(toast)
+        canvas.pack()
         tk.Label(
             inner, text=text,
-            bg="#1f1f24", fg="#e8e8ec",
-            font=("Segoe UI", 9),
-            padx=14, pady=7,
+            bg=GLASS_FILL, fg=GLASS_FG, font=("Segoe UI", 9),
         ).pack()
+        self._glass_refit(canvas, inner)
 
         # Center horizontally on the crab, sit just above it.
         self.root.update_idletasks()
@@ -2001,6 +2144,266 @@ class CrabPet:
             if frames:
                 setattr(self, attr, frames)
 
+    # ---------- characters (crab / dragon / crow) ----------
+
+    CRAB_INTERVALS = {"standing": 0, "dangle": 150, "cheer": 200, "hop": 100,
+                      "typing": 220, "sleeping": 650}
+
+    def _load_character(self, name, crow_frames=None):
+        """Build the PhotoImage frame lists for the pixel crab/dragon or the
+        vector crow. crow_frames = PIL frames already rendered off-thread."""
+        if name == "crow":
+            frames = crow_frames or crow_art.load_or_build(STATE_DIR / "crow_frames")
+
+            def photos(key):
+                return [ImageTk.PhotoImage(im) for im in frames[key]]
+
+            self.standing_tks = photos("idle")
+            self.standing_tk = self.standing_tks[0]
+            self.typing_tks = photos("typing")
+            self.sleeping_tks = photos("sleeping")
+            self.cheer_tks = photos("cheer")
+            self.dangle_tks = photos("dangle")
+            self.hop_tks = photos("hop")
+            self.anim_intervals = dict(crow_art.INTERVALS)
+        else:
+            self.standing_tk = ImageTk.PhotoImage(crab_image(STANDING))
+            self.standing_tks = None      # crab stance is a single static frame
+            self.dangle_tks = [ImageTk.PhotoImage(crab_image(f)) for f in DANGLE_FRAMES]
+            self.typing_tks = [ImageTk.PhotoImage(crab_image(f)) for f in TYPING_FRAMES]
+            self.cheer_tks = [ImageTk.PhotoImage(crab_image(f)) for f in CHEER_FRAMES]
+            self.hop_tks = [ImageTk.PhotoImage(crab_image(f)) for f in HOP_FRAMES]
+            self.sleeping_tks = [
+                ImageTk.PhotoImage(crab_image(SLEEPING_BODY, zs=zs))
+                for zs in SLEEPING_Z_FRAMES
+            ]
+            self.anim_intervals = dict(self.CRAB_INTERVALS)
+            # Custom PNG/GIF overrides: <theme>_<state>.png next to pet.py.
+            self._apply_png_overrides()
+        self.character = name
+
+    def _switch_character(self, name):
+        if name == self.character:
+            return
+        if name == "crow" and crow_art is None:
+            self.show_toast("✗ crow.py is missing")
+            return
+        self.settings[self._char_key] = name
+        save_settings(self.settings)
+        if name != "crow":
+            self._apply_character(name, None)
+            return
+        # Rendering the crow takes ~1s the first time; do it off the UI thread.
+        self.show_toast("🥚 Hatching crow…", duration_ms=8000)
+
+        def worker():
+            try:
+                frames = crow_art.load_or_build(STATE_DIR / "crow_frames")
+            except Exception:
+                frames = None
+            self.root.after(0, lambda: self._apply_character("crow", frames))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_character(self, name, crow_frames):
+        if name == "crow" and crow_frames is None:
+            self.show_toast("✗ Couldn't hatch the crow")
+            return
+        self._load_character(name, crow_frames)
+        self._current_anim = None            # force the new frames to play
+        self.crab_label.config(image=self.standing_tk)
+        self.update_animation()
+        self._reanchor()
+        self._update_pill_window()
+        self.show_toast("🐦 Caw!" if name == "crow" else f"Back to {name}")
+
+    # ---------- usage panel (click the pet) ----------
+
+    USAGE_W, USAGE_H = 248, 194
+    USAGE_ORANGE = "#d97757"
+    USAGE_TRACK = "#474b58"
+
+    def _usage_refresh_worker(self, then_render=False):
+        """Background: update the transcript index and recompute stats."""
+        with self._usage_lock:
+            try:
+                if self._usage_index is None:
+                    self._usage_index = usage_stats.UsageIndex(STATE_DIR / "usage_index.json")
+                self._usage_index.refresh()
+                stats = self._usage_index.stats()
+                stats["at"] = time.time()
+            except Exception:
+                stats = None
+        if stats is not None:
+            self._usage_stats = stats
+        if then_render:
+            self.root.after(0, self._render_usage_panel)
+
+    def toggle_usage_panel(self):
+        if self._usage_visible:
+            self._close_usage_panel()
+            return
+        if time.time() - self._usage_closed_at < 0.35:
+            return   # this click is the one whose focus change just closed it
+        if usage_stats is None:
+            self.show_toast("✗ usage.py is missing")
+            return
+        if self._usage_window is None:
+            self._build_usage_window()
+        self._usage_visible = True
+        self._usage_opened_at = time.time()
+        self._hide_pill_window()
+        self._render_usage_panel()
+        self._usage_window.deiconify()
+        self._usage_window.attributes("-topmost", True)
+        self._update_usage_position()
+        try:
+            self._usage_window.focus_force()
+        except Exception:
+            pass
+        self._usage_tick()
+
+    def _usage_tick(self):
+        """While open: refresh data + countdown every 20s."""
+        if not self._usage_visible:
+            return
+        threading.Thread(target=self._usage_refresh_worker,
+                         kwargs={"then_render": True}, daemon=True).start()
+        self._usage_tick_after = self.root.after(20000, self._usage_tick)
+
+    def _close_usage_panel(self, event=None):
+        if not self._usage_visible:
+            return
+        is_focus_out = event is not None and str(getattr(event, "type", "")) == "FocusOut"
+        if is_focus_out and time.time() - self._usage_opened_at < 0.3:
+            return   # focus settling right after opening, not a real click-away
+        self._usage_visible = False
+        self._usage_closed_at = time.time()
+        if self._usage_tick_after is not None:
+            try:
+                self.root.after_cancel(self._usage_tick_after)
+            except Exception:
+                pass
+            self._usage_tick_after = None
+        try:
+            self._usage_window.withdraw()
+        except Exception:
+            pass
+        self._update_pill_window()
+
+    def _build_usage_window(self):
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        try:
+            win.attributes("-transparentcolor", TRANSPARENT_KEY)
+            win.attributes("-alpha", GLASS_ALPHA)
+        except tk.TclError:
+            pass
+        win.configure(bg=TRANSPARENT_KEY)
+        canvas = tk.Canvas(win, width=self.USAGE_W, height=self.USAGE_H,
+                           bg=TRANSPARENT_KEY, highlightthickness=0, bd=0)
+        canvas.pack()
+        # Dismiss: click the panel, click anywhere else, or Esc.
+        canvas.bind("<Button-1>", self._close_usage_panel)
+        win.bind("<Escape>", self._close_usage_panel)
+        win.bind("<FocusOut>", self._close_usage_panel)
+        win.withdraw()
+        self._usage_window, self._usage_canvas = win, canvas
+
+    def _usage_bar(self, c, x0, y0, x1, h, frac, fill):
+        """Rounded track + rounded fill."""
+        r = h / 2
+        c.create_polygon(_round_rect_points(x0, y0, x1, y0 + h, r), smooth=True,
+                         fill=self.USAGE_TRACK, outline="")
+        frac = max(0.0, min(1.0, frac))
+        if frac <= 0:
+            return
+        xf = x0 + max(h, (x1 - x0) * frac)
+        c.create_polygon(_round_rect_points(x0, y0, xf, y0 + h, r), smooth=True,
+                         fill=fill, outline="")
+
+    def _render_usage_panel(self):
+        if not self._usage_visible or self._usage_canvas is None:
+            return
+        c, wd, ht = self._usage_canvas, self.USAGE_W, self.USAGE_H
+        c.delete("all")
+        self._draw_glass(c, wd, ht)
+        pad = 16
+        f_title = (GLASS_FONT, 10)
+        f_label = (GLASS_FONT, 8)
+        f_value = (GLASS_FONT, 9)
+        c.create_text(pad, 22, text="Claude usage", anchor="w", fill=GLASS_FG, font=f_title)
+        st = self._usage_stats
+        if st is None:
+            c.create_text(wd / 2, ht / 2 + 8, text="Reading transcripts…",
+                          fill=GLASS_FG_DIM, font=f_label)
+            return
+        fmt = usage_stats.fmt_tokens
+
+        # Session: progress through Claude's 5-hour window + reset countdown.
+        y = 48
+        c.create_text(pad, y, text="Session", anchor="w", fill=GLASS_FG_DIM, font=f_label)
+        left = None
+        if st["session_resets_in"] is not None:
+            left = st["session_resets_in"] - (time.time() - st["at"])
+        if left is not None and left > 0:
+            c.create_text(wd - pad, y, text=f"resets in {usage_stats.fmt_duration(left)}",
+                          anchor="e", fill=GLASS_FG_DIM, font=f_label)
+            elapsed = 1 - left / usage_stats.BLOCK
+            self._usage_bar(c, pad, y + 12, wd - pad, 8, elapsed, self.USAGE_ORANGE)
+            c.create_text(pad, y + 34, text=f"{fmt(st['session'])} tokens",
+                          anchor="w", fill=GLASS_FG, font=f_value)
+        else:
+            c.create_text(wd - pad, y, text="idle", anchor="e",
+                          fill=GLASS_FG_DIM, font=f_label)
+            self._usage_bar(c, pad, y + 12, wd - pad, 8, 0, self.USAGE_ORANGE)
+            c.create_text(pad, y + 34, text="No active session", anchor="w",
+                          fill=GLASS_FG, font=f_value)
+        c.create_text(wd - pad, y + 34, text=f"{st['replies_today']} replies today",
+                      anchor="e", fill=GLASS_FG_DIM, font=f_label)
+
+        # Week: daily bars for the last 7 days (today in orange).
+        y = 110
+        c.create_text(pad, y, text="This week", anchor="w", fill=GLASS_FG_DIM, font=f_label)
+        c.create_text(wd - pad, y, text=fmt(st["week"]), anchor="e",
+                      fill=GLASS_FG, font=f_value)
+        days = st["days"]
+        top, base = y + 14, y + 56
+        peak = max((t for _, t in days), default=0) or 1
+        slot = (wd - pad * 2) / len(days)
+        bw = 16
+        for i, (letter, tok) in enumerate(days):
+            cx = pad + slot * i + slot / 2
+            today = i == len(days) - 1
+            hgt = max(3, (base - top) * tok / peak) if tok else 3
+            color = self.USAGE_ORANGE if today else ("#8a93ad" if tok else self.USAGE_TRACK)
+            c.create_polygon(_round_rect_points(cx - bw / 2, base - hgt, cx + bw / 2, base,
+                                                min(4, hgt / 2)),
+                             smooth=True, fill=color, outline="")
+            c.create_text(cx, base + 11, text=letter,
+                          fill=GLASS_FG if today else GLASS_FG_DIM, font=f_label)
+
+    def _update_usage_position(self):
+        """Centered above the pet (or below if there's no room), on-screen."""
+        if not self._usage_visible or self._usage_window is None:
+            return
+        try:
+            self.root.update_idletasks()
+            crab_x = self.root.winfo_x() + self.crab_label.winfo_x()
+            crab_w = self.crab_label.winfo_width()
+            top = self.root.winfo_y()
+            bottom = top + self.root.winfo_height()
+            sw = self.root.winfo_screenwidth()
+            x = crab_x + (crab_w - self.USAGE_W) // 2
+            x = max(4, min(x, sw - self.USAGE_W - 4))
+            y = top - self.USAGE_H - 6
+            if y < 4:
+                y = bottom + 6
+            self._usage_window.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
     # ---------- MCP reauth bubble ----------
 
     def _snapshot_mcp_cache(self):
@@ -2019,51 +2422,40 @@ class CrabPet:
         return seen
 
     def _build_mcp_bubble(self):
-        """A persistent floating bubble: 'X needs reauth' + Reauth / Dismiss."""
+        """A persistent floating glass bubble: 'X needs reauth' + Reauth /
+        Dismiss."""
         self.mcp_window = tk.Toplevel(self.root)
         self.mcp_window.overrideredirect(True)
         self.mcp_window.attributes("-topmost", True)
         try:
             self.mcp_window.attributes("-transparentcolor", TRANSPARENT_KEY)
+            self.mcp_window.attributes("-alpha", GLASS_ALPHA)
         except tk.TclError:
             pass
         self.mcp_window.configure(bg=TRANSPARENT_KEY)
 
-        border = tk.Frame(self.mcp_window, bg="#3a3a42")
-        border.pack()
-        inner = tk.Frame(border, bg="#1f1f24", padx=12, pady=8)
-        inner.pack(padx=1, pady=1)
+        self.mcp_canvas, inner = self._glass_wrap(self.mcp_window)
+        self.mcp_canvas.pack()
 
         tk.Label(
-            inner, text="🔑",
-            bg="#1f1f24", fg="#e8e8ec",
-            font=("Segoe UI Emoji", 14),
+            inner, text="🔑", bg=GLASS_FILL, fg=GLASS_FG,
+            font=("Segoe UI Emoji", 15),
         ).pack()
 
         self.mcp_title_label = tk.Label(
             inner, text="MCP needs reauth",
-            bg="#1f1f24", fg="#e8e8ec",
-            font=("Segoe UI", 9, "bold"),
+            bg=GLASS_FILL, fg=GLASS_FG, font=("Segoe UI", 10, "bold"),
         )
-        self.mcp_title_label.pack(pady=(2, 6))
+        self.mcp_title_label.pack(pady=(3, 10))
 
-        btn_row = tk.Frame(inner, bg="#1f1f24")
+        btn_row = tk.Frame(inner, bg=GLASS_FILL)
         btn_row.pack()
-        tk.Button(
-            btn_row, text="Reauth",
-            command=self._mcp_reauth_clicked,
-            bg="#3fa54f", fg="white", activebackground="#54c265",
-            relief="flat", bd=0, font=("Segoe UI", 8, "bold"),
-            padx=10, pady=3, cursor="hand2",
-        ).pack(side="left", padx=2)
-        tk.Button(
-            btn_row, text="Dismiss",
-            command=self._mcp_dismiss_clicked,
-            bg="#555562", fg="white", activebackground="#777",
-            relief="flat", bd=0, font=("Segoe UI", 8),
-            padx=10, pady=3, cursor="hand2",
-        ).pack(side="left", padx=2)
+        self._glass_button(btn_row, "Reauth", "#30d158", "#43dd68",
+                           self._mcp_reauth_clicked).pack(side="left", padx=(0, 6))
+        self._glass_button(btn_row, "Dismiss", "#48484a", "#5a5a5c",
+                           self._mcp_dismiss_clicked).pack(side="left")
 
+        self._glass_refit(self.mcp_canvas, inner)
         self.mcp_window.withdraw()
 
     def _check_mcp_reauth(self):
@@ -2095,6 +2487,7 @@ class CrabPet:
             display = display[len("claude.ai "):]
         self._mcp_current_server = server_name
         self.mcp_title_label.config(text=f"{display} needs reauth")
+        self._glass_refit(self.mcp_canvas, self.mcp_title_label.master)
         self._update_mcp_position()
         self.mcp_window.deiconify()
         self.mcp_window.attributes("-topmost", True)
@@ -2220,10 +2613,10 @@ class CrabPet:
         return 4.0
 
     def show_emote_text(self, text):
-        """Render a small dark text-bubble instead of an emoji."""
+        """Render a small frosted text-bubble instead of an emoji."""
         self.emote_label.config(
             image="", text=text,
-            bg=TAG_BG, fg=TAG_FG,
+            bg=GLASS_FILL, fg=GLASS_FG,
             font=("Segoe UI", 9, "bold"),
             padx=10, pady=4,
         )
@@ -2329,6 +2722,9 @@ class CrabPet:
             if label.winfo_exists():
                 try:
                     label.config(bg=color, fg=fg)
+                    # Repaint the glass card in the flash colour too, so the
+                    # whole pill tints rather than just the text's backing.
+                    self._refit_pill(pill, fill=color)
                 except tk.TclError:
                     pass
             self.root.after(then_ms, after_fn)
@@ -2390,14 +2786,15 @@ class CrabPet:
     # ---------- animation ----------
 
     def update_animation(self):
+        iv = self.anim_intervals
         if self._dragged:
-            self._play("dangle", self.dangle_tks, 150)
+            self._play("dangle", self.dangle_tks, iv["dangle"])
             return
         if time.time() < self._cheer_until:
-            self._play("cheer", self.cheer_tks, 200)
+            self._play("cheer", self.cheer_tks, iv["cheer"])
             return
         if time.time() < self._hop_until:
-            self._play("hop", self.hop_tks, 100)
+            self._play("hop", self.hop_tks, iv["hop"])
             return
         # Drive the animation from the EXACT pills currently displayed, so
         # the crab can never disagree with what Tian sees. If every pill is
@@ -2405,12 +2802,13 @@ class CrabPet:
         # sleeps. A working pill — and only a working pill — makes it type.
         visible_states = [p.get("state", "idle") for p in self.pills.values()]
         if "working" in visible_states:
-            self._play("typing", self.typing_tks, 220)
+            self._play("typing", self.typing_tks, iv["typing"])
         elif any(s in ("attention", "permission", "tool") for s in visible_states):
-            self._play("standing", None, 0)
+            # Crab: static stance. Crow: animated alert idle (looks around).
+            self._play("standing", self.standing_tks, iv["standing"])
         else:
             # Sleeping with the new cap + Zzz — the idle state.
-            self._play("sleeping", self.sleeping_tks, 650)
+            self._play("sleeping", self.sleeping_tks, iv["sleeping"])
 
     def _play(self, name, frames, interval_ms):
         if name == self._current_anim:
@@ -2707,6 +3105,7 @@ class CrabPet:
 
         self.update_animation()
         self._reanchor()
+        self._update_pill_window()
         self.root.after(300, self.poll)
 
     def _force_topmost(self):
@@ -2755,6 +3154,10 @@ class CrabPet:
 
         # Aux windows don't compete with the menu's position, so it's safe to
         # keep re-asserting them either way.
+        if getattr(self, "_pill_window_visible", False):
+            bump(self.pill_window)
+        if getattr(self, "_usage_visible", False):
+            bump(self._usage_window)
         if getattr(self, "_emote_visible", False):
             bump(self.emote_window)
         if getattr(self, "_delete_visible", False):
@@ -2787,6 +3190,10 @@ class CrabPet:
         """Fast loop (~25x/sec): re-assert topmost AND sync auxiliary bubble
         positions so they follow the crab in real time during drag."""
         self._force_topmost()
+        if self._pill_window_visible:
+            self._update_pill_window()  # follow the crab during drag
+        if self._usage_visible:
+            self._update_usage_position()
         if self._emote_visible:
             self._update_emote_position()
         if self._mcp_visible:

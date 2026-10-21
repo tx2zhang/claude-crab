@@ -17,6 +17,13 @@ walkthrough.
 
 ## What it does
 
+- 🐦 **Crow mode** — right-click → *Switch to crow* swaps the pixel crab for a
+  smooth vector crow with its own animations: pecks at a laptop while Claude
+  works, naps in a nest with a nightcap, flaps and caws when a task finishes,
+  panics when you pick it up. Choice is remembered per pet.
+- 📊 **Usage panel** — click the pet to see your current 5-hour session
+  (progress + reset countdown, tokens used) and a 7-day usage chart. Computed
+  locally from Claude Code transcripts; no network, no credentials.
 - 🦀 **Pixel-art crab** sits on top of every window, transparent background,
   drag to move (including to other monitors).
 - 🏷️ **Dark status pills** above the crab show one row per Claude session,
@@ -44,6 +51,8 @@ walkthrough.
 ## Right-click menu
 
 - **Open Claude** — focuses Claude Desktop, or launches it
+- **📊 Usage** — open the usage panel (same as clicking the pet)
+- **🐦 Switch to crow / 🦀 Switch to crab** — change character
 - **🎉 Cheer** — fire the cheer animation on demand
 - **✨ Duplicate crab** — spawn another crab with its own position
 - **🔔 Enable chime / 🔇 Mute chime** — toggle the sound effect
@@ -77,6 +86,8 @@ To broaden the gate to other tools, change `"matcher": "Bash"` in your
 | File | What |
 |---|---|
 | `pet.py` | The desktop pet (Tk + Pillow) |
+| `crow.py` | Procedural vector crow: poses → smooth animation frames (cached in `state/crow_frames/`) |
+| `usage.py` | Incremental transcript scanner behind the usage panel (index in `state/usage_index.json`) |
 | `hook_status.py` | Writes per-session status from Claude hooks |
 | `permission_gate.py` | PreToolUse gate that pauses Claude until you click |
 | `start-crab.vbs` | Silent launcher (no console window) |
