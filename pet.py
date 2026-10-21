@@ -72,6 +72,10 @@ try:
     import usage as usage_stats
 except Exception:
     usage_stats = None
+try:
+    import halloween as halloween_art
+except Exception:
+    halloween_art = None
 
 ROOT = Path(os.path.expanduser("~/.claude/pet"))
 STATE_DIR = ROOT / "state"
@@ -279,6 +283,10 @@ CARD_STATUS = {   # state -> (label, dot colour)
     "permission": ("Approve?", "#ff9f43"),
     "idle":       ("Idle", "#8a93a3"),
 }
+
+
+def _hex(rgb):
+    return "#%02x%02x%02x" % tuple(rgb[:3])
 
 
 def _mix_hex(a, b, t):
@@ -1161,7 +1169,10 @@ class CrabPet:
         self._card_content_item = self.card_canvas.create_window(
             CARD_PX, CARD_PY, anchor="nw", window=self.pill_frame)
         self._card_size = (1, 1)
+        self._card_margin = (0, 0)
+        self._canvas_size = (1, 1)
         self._tail_x = 0
+        self._cs = self._card_style()
         for ev, fn in (("<ButtonPress-1>", self.on_press),
                        ("<B1-Motion>", self.on_motion),
                        ("<ButtonRelease-1>", self.on_release)):
@@ -1513,7 +1524,7 @@ class CrabPet:
 
     def _make_row(self, key):
         """One session row in the notification card (drawn in _layout_card)."""
-        row = tk.Canvas(self.pill_frame, bg=GLASS_FILL, highlightthickness=0,
+        row = tk.Canvas(self.pill_frame, bg=self._cs["fill"], highlightthickness=0,
                         bd=0, height=ROW_H, width=dp(200))
         row.bind("<ButtonPress-1>", self.on_press)
         row.bind("<B1-Motion>", self.on_motion)
@@ -1521,13 +1532,28 @@ class CrabPet:
         row.bind("<Button-3>", lambda e, k=key: self._on_pill_right_click(e, k))
         row.bind("<Double-Button-1>", lambda e, k=key: self._start_rename(k))
         row.bind("<Enter>", lambda _e, k=key, r=row: (
-            r.configure(bg=GLASS_HOVER), self._show_delete_for_pill(k)))
+            r.configure(bg=self._cs["hover"]), self._show_delete_for_pill(k)))
         row.bind("<Leave>", lambda _e, r=row: (
-            r.configure(bg=GLASS_FILL), self._hide_delete_soon()))
+            r.configure(bg=self._cs["fill"]), self._hide_delete_soon()))
         return {"frame": row, "canvas": row, "sids": [], "dot": None}
+
+    def _card_style(self):
+        """Witchy card while the crow brews in its cauldron; clean glass card
+        for the crab and laptop modes."""
+        if (self.character == "crow" and halloween_art is not None
+                and self._crow_work_anim() == "brewing"):
+            hw = halloween_art
+            return dict(name="witch", fill=_hex(hw.FILL), hover=_hex(hw.HOVER),
+                        divider=_hex(hw.DIVIDER), fg="#f3ecff", fg_dim="#a596bd",
+                        px=dp(12), py=dp(11), status=hw.STATUS)
+        return dict(name="modern", fill=GLASS_FILL, hover=GLASS_HOVER,
+                    divider=GLASS_DIVIDER, fg=GLASS_FG, fg_dim=GLASS_FG_DIM,
+                    px=CARD_PX, py=CARD_PY, status=CARD_STATUS)
 
     def _layout_card(self):
         """Lay out every row at one shared width and redraw the card."""
+        cs = self._cs = self._card_style()
+        self.pill_frame.configure(bg=cs["fill"])
         if not self.pills:
             return
         keys = sorted(self.pills)
@@ -1536,7 +1562,7 @@ class CrabPet:
         rows, need = [], 0
         for key in keys:
             p = self.pills[key]
-            label, color = CARD_STATUS.get(p.get("state"), (p.get("state") or "", "#8a93a3"))
+            label, color = cs["status"].get(p.get("state"), (p.get("state") or "", "#8a93a3"))
             title = p.get("name") or ""
             if ft.measure(title) > max_title:
                 while title and ft.measure(title + "…") > max_title:
@@ -1552,21 +1578,25 @@ class CrabPet:
         for i, (p, title, label, color) in enumerate(rows):
             c = p["canvas"]
             c.delete("all")
-            c.configure(width=row_w, height=ROW_H, bg=GLASS_FILL)
+            c.configure(width=row_w, height=ROW_H, bg=cs["fill"])
             if i:
-                c.create_line(TEXT_X, 0, row_w - dp(4), 0, fill=GLASS_DIVIDER)
+                c.create_line(TEXT_X, 0, row_w - dp(4), 0, fill=cs["divider"])
             p["dot"] = c.create_oval(DOT_X - r, mid - r, DOT_X + r, mid + r,
                                      fill=color, outline=color)
-            c.create_text(TEXT_X, mid, text=title, anchor="w", fill=GLASS_FG, font=ft)
+            c.create_text(TEXT_X, mid, text=title, anchor="w", fill=cs["fg"], font=ft)
             urgent = p.get("state") in ("attention", "permission")
             c.create_text(row_w - dp(12), mid, text=label, anchor="e",
-                          fill=color if urgent else GLASS_FG_DIM, font=fs)
+                          fill=color if urgent else cs["fg_dim"], font=fs)
             p["frame"].pack()
-        cw = row_w + 2 * CARD_PX
-        ch = len(rows) * ROW_H + 2 * CARD_PY
+        cw = row_w + 2 * cs["px"]
+        ch = len(rows) * ROW_H + 2 * cs["py"]
         self._card_size = (cw, ch)
-        self.card_canvas.configure(width=cw, height=ch + TAIL_H)
-        self.card_canvas.coords(self._card_content_item, CARD_PX, CARD_PY)
+        if cs["name"] == "witch":
+            mx, mt, _ = halloween_art.margins(UI_SCALE)    # room for bats & spider
+        else:
+            mx = mt = 0
+        self._card_margin = (mx, mt)
+        self.card_canvas.coords(self._card_content_item, mx + cs["px"], mt + cs["py"])
         self._tail_x = cw // 2
         self._draw_card()
 
@@ -1575,19 +1605,29 @@ class CrabPet:
         c = self.card_canvas
         cw, ch = self._card_size
         c.delete("card")
-        c.create_polygon(_round_rect_points(1, 1, cw - 1, ch - 1, dp(14)), smooth=True,
-                         fill=GLASS_FILL, outline=GLASS_BORDER, width=1, tags="card")
-        tx, hw = self._tail_x, TAIL_W / 2
-        c.create_polygon(tx - hw, ch - 2, tx + hw, ch - 2, tx, ch - 1 + TAIL_H,
-                         fill=GLASS_FILL, outline="", tags="card")
-        c.create_line(tx - hw, ch - 1, tx, ch - 1 + TAIL_H, tx + hw, ch - 1,
-                      fill=GLASS_BORDER, width=1, tags="card")
+        if self._cs["name"] == "witch":
+            img, _ = halloween_art.card_chrome(cw, ch, self._tail_x, TAIL_W, TAIL_H,
+                                               dp(14), UI_SCALE)
+            self._card_img = ImageTk.PhotoImage(img)        # keep a reference
+            c.create_image(0, 0, anchor="nw", image=self._card_img, tags="card")
+            self._canvas_size = img.size
+        else:
+            c.create_polygon(_round_rect_points(1, 1, cw - 1, ch - 1, dp(14)), smooth=True,
+                             fill=GLASS_FILL, outline=GLASS_BORDER, width=1, tags="card")
+            tx, hw = self._tail_x, TAIL_W / 2
+            c.create_polygon(tx - hw, ch - 2, tx + hw, ch - 2, tx, ch - 1 + TAIL_H,
+                             fill=GLASS_FILL, outline="", tags="card")
+            c.create_line(tx - hw, ch - 1, tx, ch - 1 + TAIL_H, tx + hw, ch - 1,
+                          fill=GLASS_BORDER, width=1, tags="card")
+            self._canvas_size = (cw, ch + TAIL_H)
+        c.configure(width=self._canvas_size[0], height=self._canvas_size[1])
         c.tag_lower("card")
 
     def _pulse_tick(self):
         """Gently pulse the dot of every working row."""
         k = 0.5 + 0.5 * math.sin(time.time() * 2 * math.pi / 1.6)
-        col = _mix_hex("#f5b942", "#80602a", 1 - k)
+        base = self._cs["status"]["working"][1]
+        col = _mix_hex(base, self._cs["fill"], 0.55 * (1 - k))
         for p in self.pills.values():
             if p.get("state") in ("working", "tool") and p.get("dot"):
                 try:
@@ -1605,16 +1645,16 @@ class CrabPet:
         try:
             self.root.update_idletasks()
             cw, ch = self._card_size
-            wh = ch + TAIL_H
+            mx, mt = self._card_margin
             crab_x = self.root.winfo_x() + self.crab_label.winfo_x()
             crab_y = self.root.winfo_y() + self.crab_label.winfo_y()
             cx = crab_x + self.crab_label.winfo_width() // 2
-            x = cx - cw // 2
+            x = cx - mx - cw // 2                  # window x; the card starts at x + mx
             area = monitor_work_area(cx, crab_y + dp(20))
             if area:   # stay on the pet's own monitor (it may be left of primary)
                 left, _top, right, _bottom = area
-                x = max(left + dp(4), min(x, right - cw - dp(4)))
-            tail = max(dp(22), min(cx - x, cw - dp(22)))
+                x = max(left + dp(4) - mx, min(x, right - cw - mx - dp(4)))
+            tail = max(dp(22), min(cx - x - mx, cw - dp(22)))
             if tail != self._tail_x:          # card nudged sideways: re-aim the tail
                 self._tail_x = tail
                 self._draw_card()
@@ -1625,8 +1665,9 @@ class CrabPet:
                 inset = dp(2)          # leave room for the witch hat
             else:
                 inset = dp(18)
-            y = crab_y + inset - wh
-            self.pill_window.geometry(f"{cw}x{wh}+{x}+{y}")
+            ww, wh = self._canvas_size
+            y = crab_y + inset - (mt + ch + TAIL_H)     # tail tip lands at the inset
+            self.pill_window.geometry(f"{ww}x{wh}+{x}+{y}")
             if not self._pill_window_visible:
                 self.pill_window.deiconify()
                 self.pill_window.attributes("-topmost", True)
@@ -2178,7 +2219,7 @@ class CrabPet:
         try:
             self.root.update_idletasks()
             size = dp(22)
-            px = self.card_canvas.winfo_rootx() + self._card_size[0] + dp(6)
+            px = self.card_canvas.winfo_rootx() + self._card_margin[0] + self._card_size[0] + dp(6)
             py = frame.winfo_rooty() + (ROW_H - size) // 2
             self.delete_window.geometry(f"+{px}+{py}")
             if not self._delete_visible:
@@ -2310,10 +2351,11 @@ class CrabPet:
         vector crow. crow_frames = PIL frames already rendered off-thread."""
         if name == "crow":
             frames = crow_frames or crow_art.load_or_build(STATE_DIR / "crow_frames", scale=UI_SCALE)
-            self._crow_frames = frames
+            # Keep only the two work loops' PIL frames (for the laptop/cauldron toggle).
+            self._crow_frames = {k: frames[k] for k in ("typing", "brewing")}
 
             def photos(key):
-                return [ImageTk.PhotoImage(im) for im in frames[key]]
+                return self._photos(frames[key])
 
             self.standing_tks = photos("idle")
             self.standing_tk = self.standing_tks[0]
@@ -2364,6 +2406,18 @@ class CrabPet:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    @staticmethod
+    def _photos(imgs):
+        """PhotoImages for a frame sequence, one per unique frame (looping
+        sections like the cauldron stir repeat the same frames)."""
+        made = {}
+        out = []
+        for im in imgs:
+            if id(im) not in made:
+                made[id(im)] = ImageTk.PhotoImage(im)
+            out.append(made[id(im)])
+        return out
+
     def _crow_work_anim(self):
         """Which working animation the crow uses: cauldron (default) or laptop."""
         return "typing" if self.settings.get("crow_work") == "laptop" else "brewing"
@@ -2373,11 +2427,12 @@ class CrabPet:
         save_settings(self.settings)
         if self.character == "crow" and getattr(self, "_crow_frames", None):
             work = self._crow_work_anim()
-            self.typing_tks = [ImageTk.PhotoImage(im) for im in self._crow_frames[work]]
+            self.typing_tks = self._photos(self._crow_frames[work])
             self.anim_intervals["typing"] = crow_art.INTERVALS[work]
             self._current_anim = None
             self.update_animation()
-            self._update_pill_window()
+        self._layout_card()
+        self._update_pill_window()
         self.show_toast("🧪 Brewing mode" if mode == "cauldron" else "💻 Laptop mode")
 
     def _apply_character(self, name, crow_frames):
@@ -2389,6 +2444,7 @@ class CrabPet:
         self.crab_label.config(image=self.standing_tk)
         self.update_animation()
         self._reanchor()
+        self._layout_card()
         self._update_pill_window()
         self.show_toast("🐦 Caw!" if name == "crow" else f"Back to {name}")
 

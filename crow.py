@@ -602,8 +602,11 @@ STEAM     = [(194, 248, 180), (216, 188, 255)]
 DROP      = (141, 255, 106)
 
 #           cx   w   h0  cycles/loop phase
-FLAMES = [(67, 7, 8, 9, 0.3), (73, 8, 11, 11, 0.7), (79, 9, 13, 7, 0.0),
-          (85, 8, 11, 10, 0.5), (91, 7, 8, 13, 0.2)]
+FLAMES = [(67, 7, 8, 2, 0.3), (73, 8, 11, 3, 0.7), (79, 9, 13, 2, 0.0),
+          (85, 8, 11, 3, 0.5), (91, 7, 8, 2, 0.2)]
+
+SPOON    = (152, 102, 60)
+SPOON_HI = (198, 148, 94)
 
 
 def _flame(cx, base, w, h, lean):
@@ -642,7 +645,7 @@ def _cauldron_back(pt, C):
     cx, cy = POT_C
     pt.gradient([ell(cx, cy, POT_RX, POT_RY)], LIP_TOP, LIP_BOT)
     pt.gradient([ell(cx, cy + 0.6, LIQ_RX, LIQ_RY)], LIQ_TOP, LIQ_BOT)
-    a = 2 * math.pi * t
+    a = C.get("stir", 2 * math.pi * t)                # swirl follows the spoon
     for j in range(2):                                 # slow swirl
         a0 = a + j * math.pi
         pts = [(cx + (5 + 15 * u) * math.cos(a0 + u * 3.0),
@@ -653,7 +656,7 @@ def _cauldron_back(pt, C):
     for _ in range(7):                                 # bubbles grow and pop
         bx = rng.uniform(57, 100)
         by = cy + 0.6 + rng.uniform(-2.0, 2.6)
-        m = rng.choice((3, 4, 5))
+        m = rng.choice((1, 2))
         ph = rng.random()
         u = (t * m + ph) % 1.0
         if u < 0.7:
@@ -667,6 +670,20 @@ def _cauldron_back(pt, C):
         p = C["splash"]
         ring = ell(SPLASH_AT[0], SPLASH_AT[1], 3 + 9 * p, 1.0 + 1.8 * p)
         pt.line(ring + [ring[0]], LIQ_HI, 0.8)
+
+
+def _spoon(pt, C, grip):
+    """Long wooden spoon from the crow's beak down into the potion; the end
+    circles slowly with the stir angle."""
+    th = C.get("stir", 0.0)
+    ex = POT_C[0] + 4 + 7 * math.cos(th)
+    ey = POT_C[1] + 0.6 + 1.7 * math.sin(th)
+    gx, gy = grip
+    tx, ty = gx + (gx - ex) * 0.22, gy + (gy - ey) * 0.22     # sticks up past the beak
+    pt.line([(tx, ty), (ex, ey)], SPOON, 1.5)
+    pt.line([(tx + 0.35, ty), (ex + 0.35, ey)], SPOON_HI, 0.45)
+    ring = ell(ex, ey + 0.3, 3.2, 1.0)
+    pt.line(ring + [ring[0]], LIQ_HI, 0.6)
 
 
 def _cauldron_front(pt):
@@ -722,7 +739,7 @@ def _cauldron_fx(pt, C):
     rng = random.Random(9)
     for i in range(6):
         x0 = rng.uniform(91, 106)      # clear of the crow's beak
-        m = rng.choice((2, 3))
+        m = 1
         ph = rng.random()
         u = (t * m + ph) % 1.0
         if u > 0.9:
@@ -731,13 +748,13 @@ def _cauldron_fx(pt, C):
         r = 2.6 * (1 - u) + 0.5
         pt.poly(ell(x, 58 - u * 34, r, r * 0.8), STEAM[i % 2], fx=True)
     for i, (x, y) in enumerate(((47, 50), (109, 53), (66, 46), (104, 40))):
-        sv = math.sin(2 * math.pi * (t * 5 + i * 0.27))
+        sv = math.sin(2 * math.pi * (t * 2 + i * 0.27))
         if sv > 0.2:
             pt.poly(_star(x, y, 1.0 + 1.6 * sv, 15 * i), SPARK[i % 3], fx=True)
     if C["cast"] > 0.02:
         cs = C["cast"]
         for j in range(6):
-            a = 360 * t * 4 + j * 60
+            a = 360 * t + j * 60
             r = 4 + 4 * cs
             x = SUMMON[0] + r * math.cos(math.radians(a))
             y = SUMMON[1] + r * 0.7 * math.sin(math.radians(a))
@@ -774,6 +791,7 @@ def draw_crow(P):
         _cauldron_back(pt, C)
         if C["item"] is not None:
             _item(pt, *C["item"])
+        _spoon(pt, C, ap(Hd, (89.0, 41.5)))
         _cauldron_front(pt)
     pt.lw = k
     _wing(pt, Wf, P["spread"], far=True)
@@ -944,48 +962,59 @@ def anim_hop(n=8):
 ITEMS = ["candy", "eye", "mushroom", "bone"]
 
 
-def anim_brewing(per=30):
-    """Calm brewing loop. The crow mostly holds still on the rim (eyes follow
-    the ingredient, a tiny nod, one blink); each ingredient fades in inside a
-    soft sparkle ring, hovers, drifts slowly into the pot with a small splash,
-    then a rest beat. Long loop on purpose: ambient, not distracting."""
+AMB = 30      # ambient period in frames: fire/bubbles/steam repeat every 2.4s
+STIR = 60     # one slow turn of the spoon (4.8s) before each ingredient
+
+
+def _brew_pose(amb_f, stir=0.0, stirring=False, item=None, cast=0.0, splash=None,
+               follow=0.0, blink=False):
+    a = amb_f / AMB
+    breath = math.sin(2 * math.pi * a)
+    if stirring:              # tiny sway with the spoon, eyes on the swirl
+        head, rot = 3 + 2 * math.sin(stir), 4 + 0.6 * math.sin(stir)
+        look = (1.2 + 0.6 * math.cos(stir), 1.5)
+    else:                     # eyes follow the ingredient, a small nod
+        head, rot = 1 + 5 * follow, 4
+        look = (1.6, -1.8 + 3.4 * follow)
+    return pose(k=0.7, perch=PERCH, rot=rot, hat=True,
+                by=-0.3 * breath, sy=1 + 0.008 * breath,
+                wing=6, far_wing=10, head_rot=head,
+                eye="closed" if blink else "open", look=look, tail=0.8 * breath,
+                cauldron=dict(t=a, item=item, cast=cast, splash=splash, stir=stir))
+
+
+def anim_brewing():
+    """Calm brewing loop (~29s): the crow slowly stirs the potion with a
+    wooden spoon for 2/3 of the time, then conjures one ingredient that
+    fades in, hovers, drifts into the pot and splashes softly. Four rounds
+    (candy corn, eyeball, toadstool, bone). The stir section is identical
+    every round, so build_frames renders it once and reuses the frames."""
     out = []
-    n = per * len(ITEMS)
-    for f in range(n):
-        t = f / n
-        i, c = divmod(f, per)
-        kind = ITEMS[i]
-        item, splash, cast = None, None, 0.0
-        if c < 6:                                       # sparkle ring, item fades in
-            u = ease(c / 5)
-            cast = u
-            item = (kind, SUMMON[0], SUMMON[1], 1.3 * (0.3 + 0.7 * u), 0)
-            follow = 0.0
-        elif c < 12:                                    # hover with a gentle bob
-            u = (c - 6) / 6
-            cast = 1 - u
-            item = (kind, SUMMON[0], SUMMON[1] + 0.8 * math.sin(u * math.pi), 1.3, 0)
-            follow = 0.0
-        elif c < 24:                                    # slow eased drift into the pot
-            u = ease((c - 12) / 11)
-            item = (kind, SUMMON[0] + (SPLASH_AT[0] - SUMMON[0]) * u,
-                    SUMMON[1] + (SPLASH_AT[1] - 2 - SUMMON[1]) * u, 1.3, 50 * u)
-            follow = u
-        elif c < 28:                                    # small soft splash
-            splash = (c - 23) / 5
-            follow = 1.0
-        else:                                           # rest beat
-            follow = 1.0 - (c - 27) / 3
-        # The crow barely moves: a small nod as the ingredient goes in, eyes
-        # tracking it, slow breathing, one blink per loop.
-        breath = math.sin(2 * math.pi * t * 3)
-        eye = "closed" if f in (n // 2 - 1, n // 2) else "open"
-        out.append(pose(k=0.7, perch=PERCH, rot=4, hat=True,
-                        by=-0.3 * breath, sy=1 + 0.008 * breath,
-                        wing=6, far_wing=10, head_rot=1 + 5 * follow,
-                        eye=eye, look=(1.6, -1.8 + 3.4 * follow),
-                        tail=0.8 * breath,
-                        cauldron=dict(t=t, item=item, cast=cast, splash=splash)))
+    for kind in ITEMS:
+        for f in range(STIR):                                  # stir: one slow turn
+            out.append(_brew_pose(f % AMB, stir=2 * math.pi * f / STIR,
+                                  stirring=True, blink=f in (40, 41)))
+        for c in range(AMB):                                   # one ingredient
+            item, splash, cast, follow = None, None, 0.0, 0.0
+            if c < 6:
+                u = ease(c / 5)
+                cast = u
+                item = (kind, SUMMON[0], SUMMON[1], 1.3 * (0.3 + 0.7 * u), 0)
+            elif c < 12:
+                u = (c - 6) / 6
+                cast = 1 - u
+                item = (kind, SUMMON[0], SUMMON[1] + 0.8 * math.sin(u * math.pi), 1.3, 0)
+            elif c < 24:
+                u = ease((c - 12) / 11)
+                item = (kind, SUMMON[0] + (SPLASH_AT[0] - SUMMON[0]) * u,
+                        SUMMON[1] + (SPLASH_AT[1] - 2 - SUMMON[1]) * u, 1.3, 50 * u)
+                follow = u
+            elif c < 28:
+                splash = (c - 23) / 5
+                follow = 1.0
+            else:
+                follow = 1.0 - (c - 27) / 3
+            out.append(_brew_pose(c, item=item, cast=cast, splash=splash, follow=follow))
     return out
 
 
@@ -1011,8 +1040,19 @@ INTERVALS = {
 
 
 def build_frames(scale=1.0):
+    """{anim: [PIL frames]}. Identical poses (e.g. the repeated stir) are
+    rendered once and the same Image object is reused in the sequence."""
     configure(scale)
-    return {name: [draw_crow(p) for p in fn()] for name, fn in BUILDERS.items()}
+    out = {}
+    for name, fn in BUILDERS.items():
+        memo, seq = {}, []
+        for pz in fn():
+            key = json.dumps(pz, sort_keys=True, default=str)
+            if key not in memo:
+                memo[key] = draw_crow(pz)
+            seq.append(memo[key])
+        out[name] = seq
+    return out
 
 
 def _source_version():
@@ -1029,12 +1069,12 @@ def load_or_build(cache_dir, scale=1.0):
         meta = json.loads(manifest.read_text())
         if meta.get("version") == version:
             out = {}
-            for name, count in meta["counts"].items():
-                imgs = []
-                for i in range(count):
-                    with Image.open(cache_dir / f"{name}_{i:02d}.png") as im:
-                        imgs.append(im.convert("RGBA"))
-                out[name] = imgs
+            for name, seq in meta["seq"].items():
+                uniq = []
+                for i in range(max(seq) + 1):
+                    with Image.open(cache_dir / f"{name}_{i:03d}.png") as im:
+                        uniq.append(im.convert("RGBA"))
+                out[name] = [uniq[j] for j in seq]
             return out
     except Exception:
         pass
@@ -1043,11 +1083,16 @@ def load_or_build(cache_dir, scale=1.0):
         cache_dir.mkdir(parents=True, exist_ok=True)
         for old in cache_dir.glob("*.png"):
             old.unlink()
+        seqs = {}
         for name, imgs in frames.items():
-            for i, im in enumerate(imgs):
-                im.save(cache_dir / f"{name}_{i:02d}.png")
-        manifest.write_text(json.dumps(
-            {"version": version, "counts": {k: len(v) for k, v in frames.items()}}))
+            index, seq = {}, []
+            for im in imgs:
+                if id(im) not in index:
+                    index[id(im)] = len(index)
+                    im.save(cache_dir / f"{name}_{index[id(im)]:03d}.png")
+                seq.append(index[id(im)])
+            seqs[name] = seq
+        manifest.write_text(json.dumps({"version": version, "seq": seqs}))
     except Exception:
         pass
     return frames
