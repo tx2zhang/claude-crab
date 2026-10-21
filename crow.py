@@ -23,9 +23,23 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
-W, H = 120, 96          # final frame size (px)
-SS = 4                  # supersampling factor
+W, H = 120, 96          # design size (px at 100% display scaling)
 GROUND = 88             # y of the feet
+
+# Output resolution follows the display scale (see configure). Shapes are
+# authored in W x H design units and rasterised at SS x design size.
+SS = 4                  # supersampling factor
+OUT_W, OUT_H = W, H     # final frame size in device pixels
+RING = 1                # outline ring thickness in device pixels
+
+
+def configure(scale=1.0):
+    """Render frames for a display scale (2.0 on a 200% display)."""
+    global SS, OUT_W, OUT_H, RING
+    scale = max(1.0, float(scale))
+    SS = max(4, math.ceil(3 * scale))       # >= 3 samples per output pixel
+    OUT_W, OUT_H = round(W * scale), round(H * scale)
+    RING = max(1, round(scale))
 
 # ---------- palette ----------
 INK        = (14, 15, 20)
@@ -279,15 +293,16 @@ class Painter:
 
     def finish(self):
         def down(im):
-            return im.convert("RGBa").resize((W, H), Image.LANCZOS).convert("RGBA")
+            return im.convert("RGBa").resize((OUT_W, OUT_H), Image.LANCZOS).convert("RGBA")
 
         body = down(self.img)
         solid = body.getchannel("A").point(lambda v: 255 if v > 24 else 0)
-        ink_ring = solid.filter(ImageFilter.MaxFilter(3))      # 1px dark outline
-        rim_ring = ink_ring.filter(ImageFilter.MaxFilter(3))   # 1px light rim outside it
-        out = Image.new("RGBA", (W, H), RIM + (0,))
+        ring = 2 * RING + 1
+        ink_ring = solid.filter(ImageFilter.MaxFilter(ring))      # dark outline
+        rim_ring = ink_ring.filter(ImageFilter.MaxFilter(ring))   # light rim outside it
+        out = Image.new("RGBA", (OUT_W, OUT_H), RIM + (0,))
         out.putalpha(rim_ring)
-        ink = Image.new("RGBA", (W, H), INK + (0,))
+        ink = Image.new("RGBA", (OUT_W, OUT_H), INK + (0,))
         ink.putalpha(ink_ring)
         out = Image.alpha_composite(out, ink)
         out = Image.alpha_composite(out, body)
@@ -703,7 +718,8 @@ INTERVALS = {
 }
 
 
-def build_frames():
+def build_frames(scale=1.0):
+    configure(scale)
     return {name: [draw_crow(p) for p in fn()] for name, fn in BUILDERS.items()}
 
 
@@ -711,12 +727,12 @@ def _source_version():
     return hashlib.sha1(Path(__file__).read_bytes()).hexdigest()[:12]
 
 
-def load_or_build(cache_dir):
+def load_or_build(cache_dir, scale=1.0):
     """Frames from the disk cache if it matches this file's source, else
     render fresh (a couple of seconds) and refresh the cache."""
     cache_dir = Path(cache_dir)
     manifest = cache_dir / "manifest.json"
-    version = _source_version()
+    version = f"{_source_version()}@{float(scale):g}"
     try:
         meta = json.loads(manifest.read_text())
         if meta.get("version") == version:
@@ -730,7 +746,7 @@ def load_or_build(cache_dir):
             return out
     except Exception:
         pass
-    frames = build_frames()
+    frames = build_frames(scale)
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)
         for old in cache_dir.glob("*.png"):

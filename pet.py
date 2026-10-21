@@ -24,6 +24,35 @@ from pathlib import Path
 # Windows-only: hides the brief console flash from background PowerShell calls.
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+
+def _enable_dpi_awareness():
+    """Draw at the display's real resolution. Without this, Windows renders
+    the pet at 96 DPI and bitmap-stretches it (2x on a 200% display), which
+    made all text and art soft. Returns the UI scale factor (1.0 at 100%)."""
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)      # system DPI aware
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            return 1.0
+    try:
+        return ctypes.windll.user32.GetDpiForSystem() / 96.0
+    except Exception:
+        return 1.0
+
+
+UI_SCALE = _enable_dpi_awareness()
+
+
+def dp(v):
+    """Design pixels → device pixels. Fonts given in points scale on their
+    own; every raw pixel size/offset/padding goes through dp()."""
+    return int(round(v * UI_SCALE))
+
+
+CRAB_SCALE = max(1, int(round(5 * UI_SCALE)))   # integer, keeps pixel art crisp
+
 try:
     import winsound  # Windows-only — used for the optional chime
 except ImportError:
@@ -222,15 +251,15 @@ GLASS_BORDER = "#5f6675"   # soft light hairline edge
 GLASS_SHEEN  = "#808799"   # brighter highlight along the top edge
 GLASS_FG     = "#f3f4f6"   # primary text
 GLASS_FG_DIM = "#a8aeba"   # secondary text
-GLASS_RADIUS = 16          # corner radius (px)
+GLASS_RADIUS = dp(16)         # corner radius (px)
 GLASS_ALPHA  = 0.90        # window translucency (standalone popups + pills)
 # Crisp UI font for glass text. Tahoma hints far sharper than Segoe at small
 # sizes on layered (transparent) windows, which only get grayscale AA.
 GLASS_FONT   = "Tahoma"
-GLASS_PAD    = 12          # inset between the card edge and its content
-PILL_PAD_X   = 12          # pill card horizontal inset
-PILL_PAD_Y   = 5           # pill card vertical inset
-PILL_RADIUS  = 11          # pill corner radius (smaller than popups)
+GLASS_PAD    = dp(12)         # inset between the card edge and its content
+PILL_PAD_X   = dp(12)         # pill card horizontal inset
+PILL_PAD_Y   = dp(5)          # pill card vertical inset
+PILL_RADIUS  = dp(11)         # pill corner radius (smaller than popups)
 
 
 def _round_rect_points(x1, y1, x2, y2, r):
@@ -603,7 +632,8 @@ HOP_FRAMES = [
 ]
 
 
-def crab_image(pixels, scale=5, zs=None):
+def crab_image(pixels, scale=None, zs=None):
+    scale = scale or CRAB_SCALE
     h = len(pixels)
     w = max(len(r) for r in pixels)
     img = Image.new("RGBA", (w * scale, h * scale), (0, 0, 0, 0))
@@ -629,10 +659,11 @@ def crab_image(pixels, scale=5, zs=None):
                     fill=PALETTE[ch],
                 )
     if zs and FONT_PATH:
+        k = scale / 5.0
         for x_px, y_px, font_size in zs:
             try:
-                font = ImageFont.truetype(FONT_PATH, font_size)
-                draw.text((x_px, y_px), "Z", fill=PALETTE["z"], font=font)
+                font = ImageFont.truetype(FONT_PATH, max(1, int(round(font_size * k))))
+                draw.text((x_px * k, y_px * k), "Z", fill=PALETTE["z"], font=font)
             except Exception:
                 pass
     return img
@@ -783,16 +814,17 @@ def _no_aa_fringing(img):
     return Image.merge("RGBA", (r, g, b, new_a))
 
 
-def render_emoji(emoji, size=22):
+def render_emoji(emoji, size=None):
     """Render an emoji on a TRANSPARENT background using Segoe UI Emoji's
     color glyphs (PIL's `embedded_color=True`). The emoji floats with no
     dark chip behind it. Returns a PIL Image, or None if the font is missing.
     """
     if not os.path.exists(EMOJI_FONT_PATH):
         return None
-    pad_x, pad_y = 4, 2
-    w = size + pad_x * 2 + 6
-    h = size + pad_y * 2 + 4
+    size = size or dp(22)
+    pad_x, pad_y = dp(4), dp(2)
+    w = size + pad_x * 2 + dp(6)
+    h = size + pad_y * 2 + dp(4)
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))  # fully transparent
     draw = ImageDraw.Draw(img)
     try:
@@ -1214,7 +1246,7 @@ class CrabPet:
             fill=fill, outline=GLASS_BORDER, width=1, tags="glass",
         )
         # Bright sheen just inside the top edge — the "glass" catch-light.
-        canvas.create_line(r, 2, w - r, 2, fill=GLASS_SHEEN, width=1, tags="glass")
+        canvas.create_line(r, dp(2), w - r, dp(2), fill=GLASS_SHEEN, width=1, tags="glass")
         canvas.tag_lower("glass")
 
     def _glass_wrap(self, parent):
@@ -1241,7 +1273,7 @@ class CrabPet:
             parent, text=text, command=command,
             bg=fill, fg="white", activebackground=active, activeforeground="white",
             relief="flat", bd=0, font=("Segoe UI", 9), cursor="hand2",
-            padx=14, pady=5,
+            padx=dp(14), pady=dp(5),
         )
 
     # ---------- speech bubble ----------
@@ -1260,16 +1292,16 @@ class CrabPet:
         self.bubble_detail = tk.Label(
             self.bubble_body, text="",
             bg=GLASS_FILL, fg=GLASS_FG_DIM, font=("Consolas", 8),
-            wraplength=190, justify="left",
+            wraplength=dp(190), justify="left",
         )
-        self.bubble_detail.pack(anchor="w", pady=(3, 0))
+        self.bubble_detail.pack(anchor="w", pady=(dp(3), 0))
 
         btn_row = tk.Frame(self.bubble_body, bg=GLASS_FILL)
-        btn_row.pack(pady=(10, 0))
+        btn_row.pack(pady=(dp(10), 0))
         self._glass_button(btn_row, "Yes", "#30d158", "#43dd68",
-                           lambda: self.respond("allow")).pack(side="left", padx=(0, 6))
+                           lambda: self.respond("allow")).pack(side="left", padx=(0, dp(6)))
         self._glass_button(btn_row, "Always", "#0a84ff", "#2a97ff",
-                           lambda: self.respond("always")).pack(side="left", padx=(0, 6))
+                           lambda: self.respond("always")).pack(side="left", padx=(0, dp(6)))
         self._glass_button(btn_row, "No", "#48484a", "#5a5a5c",
                            lambda: self.respond("deny")).pack(side="left")
 
@@ -1287,7 +1319,7 @@ class CrabPet:
             # Hide the floating pill window while the permission bubble (inline
             # in the crab window) takes over.
             self._hide_pill_window()
-            self.bubble_frame.pack(before=self.crab_label, pady=(0, 1))
+            self.bubble_frame.pack(before=self.crab_label, pady=(0, dp(1)))
             self.bubble_visible = True
             self._reanchor()
 
@@ -1424,7 +1456,7 @@ class CrabPet:
         on a canvas with the status label floating on top. The delete button
         is a separate floating Toplevel shown on hover."""
         frame = tk.Frame(self.pill_frame, bg=TRANSPARENT_KEY)
-        frame.pack(pady=2)
+        frame.pack(pady=dp(2))
 
         canvas = tk.Canvas(frame, bg=TRANSPARENT_KEY, highlightthickness=0, bd=0)
         canvas.pack()
@@ -1476,8 +1508,8 @@ class CrabPet:
             crab_w = self.crab_label.winfo_width()
             x = crab_x + (crab_w - pw) // 2
             # Keep long pill stacks fully on-screen when the pet is near an edge.
-            x = max(4, min(x, self.root.winfo_screenwidth() - pw - 4))
-            y = crab_y - ph - 4
+            x = max(dp(4), min(x, self.root.winfo_screenwidth() - pw - dp(4)))
+            y = crab_y - ph - dp(4)
             self.pill_window.geometry(f"{pw}x{ph}+{x}+{y}")
             if not self._pill_window_visible:
                 self.pill_window.deiconify()
@@ -1534,7 +1566,7 @@ class CrabPet:
             insertbackground="#e8e8ec", relief="flat",
             font=("Segoe UI", 10), bd=0,
         )
-        entry.pack(padx=8, pady=6, ipady=2)
+        entry.pack(padx=dp(8), pady=dp(6), ipady=dp(2))
         entry.insert(0, current)
         entry.select_range(0, "end")
 
@@ -1554,7 +1586,7 @@ class CrabPet:
             self.root.update_idletasks()
             frame = pill["frame"]
             px = frame.winfo_rootx()
-            py = frame.winfo_rooty() - frame.winfo_height() - 6
+            py = frame.winfo_rooty() - frame.winfo_height() - dp(6)
             win.geometry(f"+{px}+{py}")
         except Exception:
             pass
@@ -1608,17 +1640,21 @@ class CrabPet:
         w = self.root.winfo_reqwidth()
         try:
             pos = json.loads(POSITION_FILE.read_text())
+            # Positions saved before sharp mode are in 96-DPI coordinates.
+            k = UI_SCALE / float(pos.get("scale", 1.0))
+            pos = {key: (v * k if isinstance(v, (int, float)) and key != "scale" else v)
+                   for key, v in pos.items()}
             if "center_x" in pos:
-                self._anchor_center_x = pos["center_x"]
-                self._anchor_bottom = pos["bottom"]
+                self._anchor_center_x = int(pos["center_x"])
+                self._anchor_bottom = int(pos["bottom"])
             elif "bottom" in pos:
                 # Migrate from top-left + bottom format.
-                self._anchor_center_x = pos["x"] + w // 2
-                self._anchor_bottom = pos["bottom"]
+                self._anchor_center_x = int(pos["x"]) + w // 2
+                self._anchor_bottom = int(pos["bottom"])
             else:
                 # Migrate from oldest top-left + top format.
-                self._anchor_center_x = pos["x"] + w // 2
-                self._anchor_bottom = pos["y"] + h
+                self._anchor_center_x = int(pos["x"]) + w // 2
+                self._anchor_bottom = int(pos["y"]) + h
             self.root.geometry(f"+{self._anchor_center_x - w // 2}+{self._anchor_bottom - h}")
             return
         except Exception:
@@ -1627,16 +1663,16 @@ class CrabPet:
         wa = get_work_area()
         if wa:
             _, _, wa_right, wa_bottom = wa
-            self._anchor_center_x = wa_right - w // 2 - 30
-            self._anchor_bottom = wa_bottom - 20
+            self._anchor_center_x = wa_right - w // 2 - dp(30)
+            self._anchor_bottom = wa_bottom - dp(20)
         else:
             sw = self.root.winfo_screenwidth()
             sh = self.root.winfo_screenheight()
-            self._anchor_center_x = sw - w // 2 - 30
-            self._anchor_bottom = sh - 80
+            self._anchor_center_x = sw - w // 2 - dp(30)
+            self._anchor_bottom = sh - dp(80)
         # Offset duplicates so they don't spawn exactly on top of the original.
         if INSTANCE_ID != "default":
-            off = (abs(hash(INSTANCE_ID)) % 120) + 30
+            off = dp((abs(hash(INSTANCE_ID)) % 120) + 30)
             self._anchor_center_x -= off
             self._anchor_bottom -= off // 2
         self.root.geometry(f"+{self._anchor_center_x - w // 2}+{self._anchor_bottom - h}")
@@ -1651,7 +1687,8 @@ class CrabPet:
             self._anchor_bottom = y + h
             POSITION_FILE.write_text(
                 json.dumps({"center_x": self._anchor_center_x,
-                            "bottom": self._anchor_bottom})
+                            "bottom": self._anchor_bottom,
+                            "scale": UI_SCALE})
             )
         except Exception:
             pass
@@ -1696,7 +1733,7 @@ class CrabPet:
     def on_motion(self, e):
         dx = e.x_root - self._press_x
         dy = e.y_root - self._press_y
-        if not self._dragged and (abs(dx) > 4 or abs(dy) > 4):
+        if not self._dragged and (abs(dx) > dp(4) or abs(dy) > dp(4)):
             self._dragged = True
             self.update_animation()
         if self._dragged:
@@ -1723,7 +1760,7 @@ class CrabPet:
                 prev_sign = 0
                 for i in range(1, len(self._shake_pts)):
                     seg = self._shake_pts[i][1] - self._shake_pts[i - 1][1]
-                    if abs(seg) < 8:
+                    if abs(seg) < dp(8):
                         continue
                     sign = 1 if seg > 0 else -1
                     if prev_sign != 0 and sign != prev_sign:
@@ -1805,14 +1842,14 @@ class CrabPet:
 
         for entry in items:
             if entry == "---":
-                tk.Frame(inner, bg=BORDER, height=1).pack(fill="x", padx=2, pady=4)
+                tk.Frame(inner, bg=BORDER, height=1).pack(fill="x", padx=dp(2), pady=dp(4))
                 continue
             label_text, command = entry
             lbl = tk.Label(
                 inner, text=label_text,
                 bg=BG, fg=FG,
                 font=("Segoe UI", 10),
-                padx=22, pady=7,
+                padx=dp(22), pady=dp(7),
                 anchor="w",
             )
             lbl.pack(fill="x")
@@ -1934,7 +1971,7 @@ class CrabPet:
         toast.update_idletasks()
         tw = toast.winfo_reqwidth()
         th = toast.winfo_reqheight()
-        toast.geometry(f"+{crab_x + (crab_w - tw) // 2}+{crab_y - th - 4}")
+        toast.geometry(f"+{crab_x + (crab_w - tw) // 2}+{crab_y - th - dp(4)}")
 
         self._toast_window = toast
         self.root.after(duration_ms, lambda: self._destroy_toast(toast))
@@ -1996,7 +2033,7 @@ class CrabPet:
             inner, text="−",
             bg=TAG_BG, fg="#cccccc",
             font=("Segoe UI", 9, "bold"),
-            padx=12, pady=3, cursor="hand2",
+            padx=dp(12), pady=dp(3), cursor="hand2",
         )
         self.delete_label.pack()
 
@@ -2022,7 +2059,7 @@ class CrabPet:
         frame = pill["frame"]
         try:
             self.root.update_idletasks()
-            px = frame.winfo_rootx() + frame.winfo_width() + 6
+            px = frame.winfo_rootx() + frame.winfo_width() + dp(6)
             py = frame.winfo_rooty()
             self.delete_window.geometry(f"+{px}+{py}")
             if not self._delete_visible:
@@ -2153,7 +2190,7 @@ class CrabPet:
         """Build the PhotoImage frame lists for the pixel crab/dragon or the
         vector crow. crow_frames = PIL frames already rendered off-thread."""
         if name == "crow":
-            frames = crow_frames or crow_art.load_or_build(STATE_DIR / "crow_frames")
+            frames = crow_frames or crow_art.load_or_build(STATE_DIR / "crow_frames", scale=UI_SCALE)
 
             def photos(key):
                 return [ImageTk.PhotoImage(im) for im in frames[key]]
@@ -2198,7 +2235,7 @@ class CrabPet:
 
         def worker():
             try:
-                frames = crow_art.load_or_build(STATE_DIR / "crow_frames")
+                frames = crow_art.load_or_build(STATE_DIR / "crow_frames", scale=UI_SCALE)
             except Exception:
                 frames = None
             self.root.after(0, lambda: self._apply_character("crow", frames))
@@ -2219,7 +2256,7 @@ class CrabPet:
 
     # ---------- usage panel (click the pet) ----------
 
-    USAGE_W, USAGE_H = 248, 194
+    USAGE_W, USAGE_H = dp(248), dp(194)
     USAGE_ORANGE = "#d97757"
     USAGE_TRACK = "#474b58"
 
@@ -2329,20 +2366,20 @@ class CrabPet:
         c, wd, ht = self._usage_canvas, self.USAGE_W, self.USAGE_H
         c.delete("all")
         self._draw_glass(c, wd, ht)
-        pad = 16
+        pad = dp(16)
         f_title = (GLASS_FONT, 10)
         f_label = (GLASS_FONT, 8)
         f_value = (GLASS_FONT, 9)
-        c.create_text(pad, 22, text="Claude usage", anchor="w", fill=GLASS_FG, font=f_title)
+        c.create_text(pad, dp(22), text="Claude usage", anchor="w", fill=GLASS_FG, font=f_title)
         st = self._usage_stats
         if st is None:
-            c.create_text(wd / 2, ht / 2 + 8, text="Reading transcripts…",
+            c.create_text(wd / 2, ht / 2 + dp(8), text="Reading transcripts…",
                           fill=GLASS_FG_DIM, font=f_label)
             return
         fmt = usage_stats.fmt_tokens
 
         # Session: progress through Claude's 5-hour window + reset countdown.
-        y = 48
+        y = dp(48)
         c.create_text(pad, y, text="Session", anchor="w", fill=GLASS_FG_DIM, font=f_label)
         left = None
         if st["session_resets_in"] is not None:
@@ -2351,37 +2388,37 @@ class CrabPet:
             c.create_text(wd - pad, y, text=f"resets in {usage_stats.fmt_duration(left)}",
                           anchor="e", fill=GLASS_FG_DIM, font=f_label)
             elapsed = 1 - left / usage_stats.BLOCK
-            self._usage_bar(c, pad, y + 12, wd - pad, 8, elapsed, self.USAGE_ORANGE)
-            c.create_text(pad, y + 34, text=f"{fmt(st['session'])} tokens",
+            self._usage_bar(c, pad, y + dp(12), wd - pad, dp(8), elapsed, self.USAGE_ORANGE)
+            c.create_text(pad, y + dp(34), text=f"{fmt(st['session'])} tokens",
                           anchor="w", fill=GLASS_FG, font=f_value)
         else:
             c.create_text(wd - pad, y, text="idle", anchor="e",
                           fill=GLASS_FG_DIM, font=f_label)
-            self._usage_bar(c, pad, y + 12, wd - pad, 8, 0, self.USAGE_ORANGE)
-            c.create_text(pad, y + 34, text="No active session", anchor="w",
+            self._usage_bar(c, pad, y + dp(12), wd - pad, dp(8), 0, self.USAGE_ORANGE)
+            c.create_text(pad, y + dp(34), text="No active session", anchor="w",
                           fill=GLASS_FG, font=f_value)
-        c.create_text(wd - pad, y + 34, text=f"{st['replies_today']} replies today",
+        c.create_text(wd - pad, y + dp(34), text=f"{st['replies_today']} replies today",
                       anchor="e", fill=GLASS_FG_DIM, font=f_label)
 
         # Week: daily bars for the last 7 days (today in orange).
-        y = 110
+        y = dp(110)
         c.create_text(pad, y, text="This week", anchor="w", fill=GLASS_FG_DIM, font=f_label)
         c.create_text(wd - pad, y, text=fmt(st["week"]), anchor="e",
                       fill=GLASS_FG, font=f_value)
         days = st["days"]
-        top, base = y + 14, y + 56
+        top, base = y + dp(14), y + dp(56)
         peak = max((t for _, t in days), default=0) or 1
         slot = (wd - pad * 2) / len(days)
-        bw = 16
+        bw = dp(16)
         for i, (letter, tok) in enumerate(days):
             cx = pad + slot * i + slot / 2
             today = i == len(days) - 1
-            hgt = max(3, (base - top) * tok / peak) if tok else 3
+            hgt = max(dp(3), (base - top) * tok / peak) if tok else dp(3)
             color = self.USAGE_ORANGE if today else ("#8a93ad" if tok else self.USAGE_TRACK)
             c.create_polygon(_round_rect_points(cx - bw / 2, base - hgt, cx + bw / 2, base,
-                                                min(4, hgt / 2)),
+                                                min(dp(4), hgt / 2)),
                              smooth=True, fill=color, outline="")
-            c.create_text(cx, base + 11, text=letter,
+            c.create_text(cx, base + dp(11), text=letter,
                           fill=GLASS_FG if today else GLASS_FG_DIM, font=f_label)
 
     def _update_usage_position(self):
@@ -2396,10 +2433,10 @@ class CrabPet:
             bottom = top + self.root.winfo_height()
             sw = self.root.winfo_screenwidth()
             x = crab_x + (crab_w - self.USAGE_W) // 2
-            x = max(4, min(x, sw - self.USAGE_W - 4))
-            y = top - self.USAGE_H - 6
-            if y < 4:
-                y = bottom + 6
+            x = max(dp(4), min(x, sw - self.USAGE_W - dp(4)))
+            y = top - self.USAGE_H - dp(6)
+            if y < dp(4):
+                y = bottom + dp(6)
             self._usage_window.geometry(f"+{x}+{y}")
         except Exception:
             pass
@@ -2446,12 +2483,12 @@ class CrabPet:
             inner, text="MCP needs reauth",
             bg=GLASS_FILL, fg=GLASS_FG, font=("Segoe UI", 10, "bold"),
         )
-        self.mcp_title_label.pack(pady=(3, 10))
+        self.mcp_title_label.pack(pady=(dp(3), dp(10)))
 
         btn_row = tk.Frame(inner, bg=GLASS_FILL)
         btn_row.pack()
         self._glass_button(btn_row, "Reauth", "#30d158", "#43dd68",
-                           self._mcp_reauth_clicked).pack(side="left", padx=(0, 6))
+                           self._mcp_reauth_clicked).pack(side="left", padx=(0, dp(6)))
         self._glass_button(btn_row, "Dismiss", "#48484a", "#5a5a5c",
                            self._mcp_dismiss_clicked).pack(side="left")
 
@@ -2509,7 +2546,7 @@ class CrabPet:
             mh = self.mcp_window.winfo_reqheight()
             # Overlap the crab's left edge by 14px so the bubble visually
             # "connects" to the body (mirrors the emote on the right).
-            ex = crab_x - mw + 14
+            ex = crab_x - mw + dp(14)
             ey = crab_y + (crab_h - mh) // 2
             self.mcp_window.geometry(f"+{ex}+{ey}")
         except Exception:
@@ -2618,7 +2655,7 @@ class CrabPet:
             image="", text=text,
             bg=GLASS_FILL, fg=GLASS_FG,
             font=("Segoe UI", 9, "bold"),
-            padx=10, pady=4,
+            padx=dp(10), pady=dp(4),
         )
         self._update_emote_position()
         if not self._emote_visible:
@@ -2635,8 +2672,8 @@ class CrabPet:
             crab_w = self.crab_label.winfo_width()
             # Overlap slightly with the crab's right edge so the emoji sits
             # right next to the head instead of floating away.
-            ex = crab_screen_x + crab_w - 16
-            ey = crab_screen_y + 2
+            ex = crab_screen_x + crab_w - dp(16)
+            ey = crab_screen_y + dp(2)
             self.emote_window.geometry(f"+{ex}+{ey}")
         except Exception:
             pass
@@ -2650,7 +2687,7 @@ class CrabPet:
             # Fallback: text on a soft chip so it stays readable without the
             # color-emoji image. Only kicks in if the emoji font is missing.
             self.emote_label.config(image="", text=emoji, bg=TAG_BG,
-                                    padx=8, pady=2)
+                                    padx=dp(8), pady=dp(2))
         self._update_emote_position()
         if not self._emote_visible:
             self.emote_window.deiconify()
@@ -2680,7 +2717,7 @@ class CrabPet:
             self._shake_anim_active = False
             return
         base = self._anchor_center_x
-        offsets = [6, -6, 5, -5, 4, -4, 3, -3, 0]
+        offsets = [dp(v) for v in (6, -6, 5, -5, 4, -4, 3, -3, 0)]
 
         def step(i):
             if i < len(offsets):
