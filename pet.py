@@ -11,6 +11,7 @@
 
 import ctypes
 import json
+import math
 import os
 import random
 import re
@@ -19,6 +20,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from pathlib import Path
 
 # Windows-only: hides the brief console flash from background PowerShell calls.
@@ -246,20 +248,45 @@ TAG_FG = "#f0f0f0"
 # bubble, MCP reauth, toast, mood blurb): a cool translucent card with a
 # hairline light edge, a bright top sheen, rounded corners, and real
 # window translucency.
-GLASS_FILL   = "#30333c"   # frosted dark slate (card body)
-GLASS_BORDER = "#5f6675"   # soft light hairline edge
-GLASS_SHEEN  = "#808799"   # brighter highlight along the top edge
+GLASS_FILL   = "#1e2026"   # frosted dark slate (card body)
+GLASS_BORDER = "#383c47"   # soft light hairline edge
 GLASS_FG     = "#f3f4f6"   # primary text
-GLASS_FG_DIM = "#a8aeba"   # secondary text
+GLASS_FG_DIM = "#9aa1ad"   # secondary text
 GLASS_RADIUS = dp(16)         # corner radius (px)
-GLASS_ALPHA  = 0.90        # window translucency (standalone popups + pills)
+GLASS_ALPHA  = 0.93        # window translucency (standalone popups + card)
 # Crisp UI font for glass text. Tahoma hints far sharper than Segoe at small
 # sizes on layered (transparent) windows, which only get grayscale AA.
-GLASS_FONT   = "Tahoma"
+GLASS_FONT   = "Segoe UI"   # resolved at startup: Inter → Segoe UI Variable
+GLASS_FONT_MED = "Segoe UI Semibold"
+GLASS_HOVER  = "#2a2d35"   # row hover
+GLASS_DIVIDER = "#2c3039"  # hairline between card rows
+
+# Notification card: one rounded card listing sessions, with a tail that
+# points down at the pet.
+ROW_H   = dp(30)
+DOT_X   = dp(14)
+TEXT_X  = dp(28)
+CARD_PX = dp(6)
+CARD_PY = dp(6)
+TAIL_W  = dp(16)
+TAIL_H  = dp(8)
+CARD_STATUS = {   # state -> (label, dot colour)
+    "working":    ("Working", "#f5b942"),
+    "tool":       ("Running tool", "#f5b942"),
+    "ready":      ("Ready", "#5fd07a"),
+    "finished":   ("Done", "#5fd07a"),
+    "attention":  ("Needs you", "#ff6b6b"),
+    "permission": ("Approve?", "#ff9f43"),
+    "idle":       ("Idle", "#8a93a3"),
+}
+
+
+def _mix_hex(a, b, t):
+    """Blend two #rrggbb colours (t=0 → a, t=1 → b)."""
+    ca = [int(a[i:i + 2], 16) for i in (1, 3, 5)]
+    cb = [int(b[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{int(x + (y - x) * t):02x}" for x, y in zip(ca, cb))
 GLASS_PAD    = dp(12)         # inset between the card edge and its content
-PILL_PAD_X   = dp(12)         # pill card horizontal inset
-PILL_PAD_Y   = dp(5)          # pill card vertical inset
-PILL_RADIUS  = dp(11)         # pill corner radius (smaller than popups)
 
 
 def _round_rect_points(x1, y1, x2, y2, r):
@@ -269,16 +296,6 @@ def _round_rect_points(x1, y1, x2, y2, r):
         x2, y2 - r,  x2, y2,  x2 - r, y2,  x1 + r, y2,
         x1, y2,  x1, y2 - r,  x1, y1 + r,  x1, y1,
     ]
-
-STATE_LOOKS = {
-    "idle":       ("idle",         "#bbbbbb"),
-    "ready":      ("ready",        "#7ecf6a"),
-    "working":    ("working...",   "#f6bf3a"),
-    "tool":       ("tool running", "#f6bf3a"),
-    "finished":   ("done",         "#7ecf6a"),
-    "attention":  ("needs you!",   "#ff7777"),
-    "permission": ("approve?",     "#ffaa55"),
-}
 
 PALETTE = {
     "1": (217, 116, 90, 255),     # crab body coral
@@ -856,6 +873,31 @@ def get_work_area():
     return None
 
 
+def monitor_work_area(x, y):
+    """Work area (left, top, right, bottom) of the monitor containing (x, y),
+    in device pixels. Positions can be negative on a left-hand monitor, so
+    clamping to the primary screen would yank popups off the pet."""
+    try:
+        from ctypes import wintypes
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                        ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+        user32 = ctypes.windll.user32
+        user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+        user32.MonitorFromPoint.restype = wintypes.HMONITOR
+        mon = user32.MonitorFromPoint(wintypes.POINT(int(x), int(y)), 2)  # nearest
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        if user32.GetMonitorInfoW(mon, ctypes.byref(info)):
+            r = info.rcWork
+            return (r.left, r.top, r.right, r.bottom)
+    except Exception:
+        pass
+    return None
+
+
 def find_claude_desktop_launcher():
     """Locate how to launch Claude Desktop on this machine.
 
@@ -1078,6 +1120,7 @@ class CrabPet:
         except tk.TclError:
             pass
         self.root.configure(bg=TRANSPARENT_KEY)
+        self._pick_fonts()
 
         # User preferences (chime, character, etc.).
         self.settings = load_settings()
@@ -1111,8 +1154,18 @@ class CrabPet:
         except tk.TclError:
             pass
         self.pill_window.configure(bg=TRANSPARENT_KEY)
-        self.pill_frame = tk.Frame(self.pill_window, bg=TRANSPARENT_KEY)
-        self.pill_frame.pack()
+        self.card_canvas = tk.Canvas(self.pill_window, bg=TRANSPARENT_KEY,
+                                     highlightthickness=0, bd=0)
+        self.card_canvas.pack()
+        self.pill_frame = tk.Frame(self.card_canvas, bg=GLASS_FILL)   # rows live here
+        self._card_content_item = self.card_canvas.create_window(
+            CARD_PX, CARD_PY, anchor="nw", window=self.pill_frame)
+        self._card_size = (1, 1)
+        self._tail_x = 0
+        for ev, fn in (("<ButtonPress-1>", self.on_press),
+                       ("<B1-Motion>", self.on_motion),
+                       ("<ButtonRelease-1>", self.on_release)):
+            self.card_canvas.bind(ev, fn)
         self.pill_window.withdraw()
         self._pill_window_visible = False
         self.pills = {}      # label -> {frame, label, sids, state}
@@ -1233,20 +1286,19 @@ class CrabPet:
 
         self.poll()
         self._topmost_loop()
+        self._pulse_tick()
 
     # ---------- frosted-glass helpers ----------
 
     def _draw_glass(self, canvas, w, h, radius=GLASS_RADIUS, fill=GLASS_FILL):
-        """Paint the frosted-glass card (rounded fill + hairline edge + top
-        sheen) onto a canvas, tagged "glass" and tucked behind the content."""
+        """Paint the glass card (rounded fill + hairline edge) onto a
+        canvas, tagged "glass" and tucked behind the content."""
         canvas.delete("glass")
         r = radius
         canvas.create_polygon(
             _round_rect_points(1, 1, w - 1, h - 1, r), smooth=True,
             fill=fill, outline=GLASS_BORDER, width=1, tags="glass",
         )
-        # Bright sheen just inside the top edge — the "glass" catch-light.
-        canvas.create_line(r, dp(2), w - r, dp(2), fill=GLASS_SHEEN, width=1, tags="glass")
         canvas.tag_lower("glass")
 
     def _glass_wrap(self, parent):
@@ -1272,7 +1324,7 @@ class CrabPet:
         return tk.Button(
             parent, text=text, command=command,
             bg=fill, fg="white", activebackground=active, activeforeground="white",
-            relief="flat", bd=0, font=("Segoe UI", 9), cursor="hand2",
+            relief="flat", bd=0, font=(GLASS_FONT_MED, 9), cursor="hand2",
             padx=dp(14), pady=dp(5),
         )
 
@@ -1285,7 +1337,7 @@ class CrabPet:
 
         self.bubble_title = tk.Label(
             self.bubble_body, text="allow ?",
-            bg=GLASS_FILL, fg=GLASS_FG, font=("Segoe UI", 10, "bold"),
+            bg=GLASS_FILL, fg=GLASS_FG, font=(GLASS_FONT_MED, 10),
         )
         self.bubble_title.pack(anchor="w")
 
@@ -1422,95 +1474,159 @@ class CrabPet:
                 if pri_curr > pri_prev:
                     g["data"] = data
 
-        # Destroy pills whose group is no longer visible.
+        # Destroy rows whose group is no longer visible.
+        changed = False
         for key in list(self.pills):
             if key not in groups:
                 if self._delete_target == key:
                     self._do_hide_delete()
                 self.pills[key]["frame"].destroy()
                 del self.pills[key]
+                changed = True
 
         for key in sorted(groups.keys()):
             g = groups[key]
             state = g["data"].get("state", "idle")
-            label_text, color = STATE_LOOKS.get(state, (state, TAG_FG))
-            display = f"{g['name']} · {label_text}"
+            p = self.pills.get(key)
+            if p is None:
+                p = self.pills[key] = self._make_row(key)
+                changed = True
+            if (p.get("name"), p.get("state")) != (g["name"], state):
+                changed = True
+            p.update(sids=g["sids"], state=state, name=g["name"])
+        if changed:
+            self._layout_card()
 
-            if key in self.pills:
-                p = self.pills[key]
-                if p["label"].cget("text") != display:
-                    p["label"].config(text=display, fg=color)
-                    self._refit_pill(p)
-                else:
-                    p["label"].config(fg=color)
-                p["sids"] = g["sids"]
-                p["state"] = state
-                p["name"] = g["name"]
-            else:
-                self.pills[key] = self._make_pill(key, display, color, g["sids"])
-                self.pills[key]["state"] = state
-                self.pills[key]["name"] = g["name"]
+    def _pick_fonts(self):
+        """Inter if installed, else Segoe UI Variable, else Segoe UI."""
+        global GLASS_FONT, GLASS_FONT_MED
+        fams = set(tkfont.families(self.root))
+        for reg, med in (("Inter", "Inter Medium"),
+                         ("Segoe UI Variable Text", "Segoe UI Variable Text Semibold"),
+                         ("Segoe UI", "Segoe UI Semibold")):
+            if reg in fams:
+                GLASS_FONT = reg
+                GLASS_FONT_MED = med if med in fams else reg
+                break
+        self._f_title = tkfont.Font(root=self.root, family=GLASS_FONT_MED, size=9)
+        self._f_status = tkfont.Font(root=self.root, family=GLASS_FONT, size=8)
 
-    def _make_pill(self, label_key, display, color, sids):
-        """Build a frosted-glass pill — a rounded, hairline-edged card drawn
-        on a canvas with the status label floating on top. The delete button
-        is a separate floating Toplevel shown on hover."""
-        frame = tk.Frame(self.pill_frame, bg=TRANSPARENT_KEY)
-        frame.pack(pady=dp(2))
+    def _make_row(self, key):
+        """One session row in the notification card (drawn in _layout_card)."""
+        row = tk.Canvas(self.pill_frame, bg=GLASS_FILL, highlightthickness=0,
+                        bd=0, height=ROW_H, width=dp(200))
+        row.bind("<ButtonPress-1>", self.on_press)
+        row.bind("<B1-Motion>", self.on_motion)
+        row.bind("<ButtonRelease-1>", self.on_release)
+        row.bind("<Button-3>", lambda e, k=key: self._on_pill_right_click(e, k))
+        row.bind("<Double-Button-1>", lambda e, k=key: self._start_rename(k))
+        row.bind("<Enter>", lambda _e, k=key, r=row: (
+            r.configure(bg=GLASS_HOVER), self._show_delete_for_pill(k)))
+        row.bind("<Leave>", lambda _e, r=row: (
+            r.configure(bg=GLASS_FILL), self._hide_delete_soon()))
+        return {"frame": row, "canvas": row, "sids": [], "dot": None}
 
-        canvas = tk.Canvas(frame, bg=TRANSPARENT_KEY, highlightthickness=0, bd=0)
-        canvas.pack()
-        label_widget = tk.Label(
-            canvas, text=display, bg=GLASS_FILL, fg=color,
-            font=(GLASS_FONT, 9),
-        )
-        canvas._content_item = canvas.create_window(
-            PILL_PAD_X, PILL_PAD_Y, anchor="nw", window=label_widget)
+    def _layout_card(self):
+        """Lay out every row at one shared width and redraw the card."""
+        if not self.pills:
+            return
+        keys = sorted(self.pills)
+        ft, fs = self._f_title, self._f_status
+        max_title = dp(230)
+        rows, need = [], 0
+        for key in keys:
+            p = self.pills[key]
+            label, color = CARD_STATUS.get(p.get("state"), (p.get("state") or "", "#8a93a3"))
+            title = p.get("name") or ""
+            if ft.measure(title) > max_title:
+                while title and ft.measure(title + "…") > max_title:
+                    title = title[:-1]
+                title = title.rstrip() + "…"
+            need = max(need, TEXT_X + ft.measure(title) + dp(18) + fs.measure(label) + dp(12))
+            rows.append((p, title, label, color))
+        row_w = max(dp(190), need)
+        for p in self.pills.values():
+            p["frame"].pack_forget()
+        mid = ROW_H / 2
+        r = dp(4)
+        for i, (p, title, label, color) in enumerate(rows):
+            c = p["canvas"]
+            c.delete("all")
+            c.configure(width=row_w, height=ROW_H, bg=GLASS_FILL)
+            if i:
+                c.create_line(TEXT_X, 0, row_w - dp(4), 0, fill=GLASS_DIVIDER)
+            p["dot"] = c.create_oval(DOT_X - r, mid - r, DOT_X + r, mid + r,
+                                     fill=color, outline=color)
+            c.create_text(TEXT_X, mid, text=title, anchor="w", fill=GLASS_FG, font=ft)
+            urgent = p.get("state") in ("attention", "permission")
+            c.create_text(row_w - dp(12), mid, text=label, anchor="e",
+                          fill=color if urgent else GLASS_FG_DIM, font=fs)
+            p["frame"].pack()
+        cw = row_w + 2 * CARD_PX
+        ch = len(rows) * ROW_H + 2 * CARD_PY
+        self._card_size = (cw, ch)
+        self.card_canvas.configure(width=cw, height=ch + TAIL_H)
+        self.card_canvas.coords(self._card_content_item, CARD_PX, CARD_PY)
+        self._tail_x = cw // 2
+        self._draw_card()
 
-        for w in (frame, canvas, label_widget):
-            w.bind("<ButtonPress-1>", self.on_press)
-            w.bind("<B1-Motion>", self.on_motion)
-            w.bind("<ButtonRelease-1>", self.on_release)
-            w.bind("<Button-3>", lambda e, k=label_key: self._on_pill_right_click(e, k))
-            w.bind("<Double-Button-1>", lambda e, k=label_key: self._start_rename(k))
-            w.bind("<Enter>", lambda _e, k=label_key: self._show_delete_for_pill(k),
-                   add="+")
-            w.bind("<Leave>", lambda _e: self._hide_delete_soon(), add="+")
+    def _draw_card(self):
+        """Rounded card + a little tail at the bottom pointing at the pet."""
+        c = self.card_canvas
+        cw, ch = self._card_size
+        c.delete("card")
+        c.create_polygon(_round_rect_points(1, 1, cw - 1, ch - 1, dp(14)), smooth=True,
+                         fill=GLASS_FILL, outline=GLASS_BORDER, width=1, tags="card")
+        tx, hw = self._tail_x, TAIL_W / 2
+        c.create_polygon(tx - hw, ch - 2, tx + hw, ch - 2, tx, ch - 1 + TAIL_H,
+                         fill=GLASS_FILL, outline="", tags="card")
+        c.create_line(tx - hw, ch - 1, tx, ch - 1 + TAIL_H, tx + hw, ch - 1,
+                      fill=GLASS_BORDER, width=1, tags="card")
+        c.tag_lower("card")
 
-        pill = {"frame": frame, "canvas": canvas, "label": label_widget,
-                "sids": list(sids)}
-        self._refit_pill(pill)
-        return pill
-
-    def _refit_pill(self, pill, fill=GLASS_FILL):
-        """Size the pill canvas to its label and (re)paint the glass card."""
-        canvas, label = pill["canvas"], pill["label"]
-        label.update_idletasks()
-        w = label.winfo_reqwidth() + PILL_PAD_X * 2
-        h = label.winfo_reqheight() + PILL_PAD_Y * 2
-        canvas.configure(width=w, height=h)
-        canvas.coords(canvas._content_item, PILL_PAD_X, PILL_PAD_Y)
-        self._draw_glass(canvas, w, h, radius=PILL_RADIUS, fill=fill)
+    def _pulse_tick(self):
+        """Gently pulse the dot of every working row."""
+        k = 0.5 + 0.5 * math.sin(time.time() * 2 * math.pi / 1.6)
+        col = _mix_hex("#f5b942", "#80602a", 1 - k)
+        for p in self.pills.values():
+            if p.get("state") in ("working", "tool") and p.get("dot"):
+                try:
+                    p["canvas"].itemconfig(p["dot"], fill=col, outline=col)
+                except tk.TclError:
+                    pass
+        self.root.after(90, self._pulse_tick)
 
     def _update_pill_window(self):
-        """Float the translucent pill window centered just above the crab.
-        Hidden while the permission bubble shows or when there are no pills."""
+        """Float the card just above the pet, its tail pointing down at it.
+        Hidden while the permission bubble or usage panel shows."""
         if self.bubble_visible or self._usage_visible or not self.pills:
             self._hide_pill_window()
             return
         try:
             self.root.update_idletasks()
-            self.pill_frame.update_idletasks()
-            pw = self.pill_frame.winfo_reqwidth()
-            ph = self.pill_frame.winfo_reqheight()
+            cw, ch = self._card_size
+            wh = ch + TAIL_H
             crab_x = self.root.winfo_x() + self.crab_label.winfo_x()
             crab_y = self.root.winfo_y() + self.crab_label.winfo_y()
-            crab_w = self.crab_label.winfo_width()
-            x = crab_x + (crab_w - pw) // 2
-            # Keep long pill stacks fully on-screen when the pet is near an edge.
-            x = max(dp(4), min(x, self.root.winfo_screenwidth() - pw - dp(4)))
-            y = crab_y - ph - dp(4)
-            self.pill_window.geometry(f"{pw}x{ph}+{x}+{y}")
+            cx = crab_x + self.crab_label.winfo_width() // 2
+            x = cx - cw // 2
+            area = monitor_work_area(cx, crab_y + dp(20))
+            if area:   # stay on the pet's own monitor (it may be left of primary)
+                left, _top, right, _bottom = area
+                x = max(left + dp(4), min(x, right - cw - dp(4)))
+            tail = max(dp(22), min(cx - x, cw - dp(22)))
+            if tail != self._tail_x:          # card nudged sideways: re-aim the tail
+                self._tail_x = tail
+                self._draw_card()
+            # Tail tip dips into the empty space above the pet's head.
+            if self.character != "crow":
+                inset = dp(6)
+            elif self._crow_work_anim() == "brewing":
+                inset = dp(2)          # leave room for the witch hat
+            else:
+                inset = dp(18)
+            y = crab_y + inset - wh
+            self.pill_window.geometry(f"{cw}x{wh}+{x}+{y}")
             if not self._pill_window_visible:
                 self.pill_window.deiconify()
                 self.pill_window.attributes("-topmost", True)
@@ -1564,7 +1680,7 @@ class CrabPet:
         entry = tk.Entry(
             inner, width=24, bg="#1f1f24", fg="#e8e8ec",
             insertbackground="#e8e8ec", relief="flat",
-            font=("Segoe UI", 10), bd=0,
+            font=(GLASS_FONT, 10), bd=0,
         )
         entry.pack(padx=dp(8), pady=dp(6), ipady=dp(2))
         entry.insert(0, current)
@@ -1630,6 +1746,8 @@ class CrabPet:
         if label_key in self.pills:
             self.pills[label_key]["frame"].destroy()
             del self.pills[label_key]
+        self._layout_card()
+        self._update_pill_window()
         self._reanchor()
 
     # ---------- positioning / drag ----------
@@ -1805,6 +1923,10 @@ class CrabPet:
             ("📊 Usage", self.toggle_usage_panel),
             ("🎉 Cheer", self._manual_cheer),
             char_item,
+            *([("💻 Type on laptop", lambda: self._set_crow_work("laptop"))
+               if self._crow_work_anim() == "brewing" else
+               ("🧪 Brew in cauldron", lambda: self._set_crow_work("cauldron"))]
+              if self.character == "crow" else []),
             (f"✨ Duplicate {self.character}", self._duplicate_self),
             chime_item,
             clamp_item,
@@ -1848,7 +1970,7 @@ class CrabPet:
             lbl = tk.Label(
                 inner, text=label_text,
                 bg=BG, fg=FG,
-                font=("Segoe UI", 10),
+                font=(GLASS_FONT, 10),
                 padx=dp(22), pady=dp(7),
                 anchor="w",
             )
@@ -1959,7 +2081,7 @@ class CrabPet:
         canvas.pack()
         tk.Label(
             inner, text=text,
-            bg=GLASS_FILL, fg=GLASS_FG, font=("Segoe UI", 9),
+            bg=GLASS_FILL, fg=GLASS_FG, font=(GLASS_FONT, 9),
         ).pack()
         self._glass_refit(canvas, inner)
 
@@ -1967,6 +2089,8 @@ class CrabPet:
         self.root.update_idletasks()
         crab_x = self.root.winfo_x() + self.crab_label.winfo_x()
         crab_y = self.root.winfo_y() + self.crab_label.winfo_y()
+        if getattr(self, "_pill_window_visible", False):
+            crab_y = min(crab_y, self.pill_window.winfo_y())
         crab_w = self.crab_label.winfo_width()
         toast.update_idletasks()
         tw = toast.winfo_reqwidth()
@@ -2026,29 +2150,23 @@ class CrabPet:
             pass
         self.delete_window.configure(bg=TRANSPARENT_KEY)
 
-        inner = tk.Frame(self.delete_window, bg=TAG_BG)
-        inner.pack()
-        # Match the pill's font + padding exactly so the bubble height lines up.
-        self.delete_label = tk.Label(
-            inner, text="−",
-            bg=TAG_BG, fg="#cccccc",
-            font=("Segoe UI", 9, "bold"),
-            padx=dp(12), pady=dp(3), cursor="hand2",
-        )
-        self.delete_label.pack()
+        size = dp(22)
+        c = tk.Canvas(self.delete_window, width=size, height=size, bg=TRANSPARENT_KEY,
+                      highlightthickness=0, bd=0, cursor="hand2")
+        c.pack()
+        circle = c.create_oval(1, 1, size - 1, size - 1, fill=GLASS_FILL, outline=GLASS_BORDER)
+        cross = c.create_text(size / 2, size / 2, text="✕", fill=GLASS_FG_DIM,
+                              font=(GLASS_FONT, 7))
 
-        # Hovering the delete button itself keeps it shown; clicking dismisses.
-        self.delete_label.bind(
-            "<Enter>",
-            lambda _e: (self._cancel_delete_hide(),
-                        self.delete_label.config(fg="#ff6666")),
-        )
-        self.delete_label.bind(
-            "<Leave>",
-            lambda _e: (self._hide_delete_soon(),
-                        self.delete_label.config(fg="#cccccc")),
-        )
-        self.delete_label.bind("<Button-1>", self._on_delete_click)
+        def hover(on):
+            c.itemconfig(circle, fill="#e5484d" if on else GLASS_FILL,
+                         outline="#e5484d" if on else GLASS_BORDER)
+            c.itemconfig(cross, fill="white" if on else GLASS_FG_DIM)
+
+        # Hovering the chip itself keeps it shown; clicking dismisses the row.
+        c.bind("<Enter>", lambda _e: (self._cancel_delete_hide(), hover(True)))
+        c.bind("<Leave>", lambda _e: (self._hide_delete_soon(), hover(False)))
+        c.bind("<Button-1>", self._on_delete_click)
         self.delete_window.withdraw()
 
     def _show_delete_for_pill(self, label_key):
@@ -2059,8 +2177,9 @@ class CrabPet:
         frame = pill["frame"]
         try:
             self.root.update_idletasks()
-            px = frame.winfo_rootx() + frame.winfo_width() + dp(6)
-            py = frame.winfo_rooty()
+            size = dp(22)
+            px = self.card_canvas.winfo_rootx() + self._card_size[0] + dp(6)
+            py = frame.winfo_rooty() + (ROW_H - size) // 2
             self.delete_window.geometry(f"+{px}+{py}")
             if not self._delete_visible:
                 self.delete_window.deiconify()
@@ -2191,18 +2310,21 @@ class CrabPet:
         vector crow. crow_frames = PIL frames already rendered off-thread."""
         if name == "crow":
             frames = crow_frames or crow_art.load_or_build(STATE_DIR / "crow_frames", scale=UI_SCALE)
+            self._crow_frames = frames
 
             def photos(key):
                 return [ImageTk.PhotoImage(im) for im in frames[key]]
 
             self.standing_tks = photos("idle")
             self.standing_tk = self.standing_tks[0]
-            self.typing_tks = photos("typing")
+            work = self._crow_work_anim()
+            self.typing_tks = photos(work)
             self.sleeping_tks = photos("sleeping")
             self.cheer_tks = photos("cheer")
             self.dangle_tks = photos("dangle")
             self.hop_tks = photos("hop")
             self.anim_intervals = dict(crow_art.INTERVALS)
+            self.anim_intervals["typing"] = crow_art.INTERVALS[work]
         else:
             self.standing_tk = ImageTk.PhotoImage(crab_image(STANDING))
             self.standing_tks = None      # crab stance is a single static frame
@@ -2241,6 +2363,22 @@ class CrabPet:
             self.root.after(0, lambda: self._apply_character("crow", frames))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _crow_work_anim(self):
+        """Which working animation the crow uses: cauldron (default) or laptop."""
+        return "typing" if self.settings.get("crow_work") == "laptop" else "brewing"
+
+    def _set_crow_work(self, mode):
+        self.settings["crow_work"] = mode
+        save_settings(self.settings)
+        if self.character == "crow" and getattr(self, "_crow_frames", None):
+            work = self._crow_work_anim()
+            self.typing_tks = [ImageTk.PhotoImage(im) for im in self._crow_frames[work]]
+            self.anim_intervals["typing"] = crow_art.INTERVALS[work]
+            self._current_anim = None
+            self.update_animation()
+            self._update_pill_window()
+        self.show_toast("🧪 Brewing mode" if mode == "cauldron" else "💻 Laptop mode")
 
     def _apply_character(self, name, crow_frames):
         if name == "crow" and crow_frames is None:
@@ -2287,6 +2425,8 @@ class CrabPet:
             return
         if self._usage_window is None:
             self._build_usage_window()
+        if getattr(self, "_toast_window", None) is not None:
+            self._destroy_toast(self._toast_window)   # don't ghost through the panel
         self._usage_visible = True
         self._usage_opened_at = time.time()
         self._hide_pill_window()
@@ -2367,7 +2507,7 @@ class CrabPet:
         c.delete("all")
         self._draw_glass(c, wd, ht)
         pad = dp(16)
-        f_title = (GLASS_FONT, 10)
+        f_title = (GLASS_FONT_MED, 10)
         f_label = (GLASS_FONT, 8)
         f_value = (GLASS_FONT, 9)
         c.create_text(pad, dp(22), text="Claude usage", anchor="w", fill=GLASS_FG, font=f_title)
@@ -2431,12 +2571,14 @@ class CrabPet:
             crab_w = self.crab_label.winfo_width()
             top = self.root.winfo_y()
             bottom = top + self.root.winfo_height()
-            sw = self.root.winfo_screenwidth()
             x = crab_x + (crab_w - self.USAGE_W) // 2
-            x = max(dp(4), min(x, sw - self.USAGE_W - dp(4)))
             y = top - self.USAGE_H - dp(6)
-            if y < dp(4):
-                y = bottom + dp(6)
+            area = monitor_work_area(crab_x + crab_w // 2, top + dp(20))
+            if area:
+                left, mon_top, right, _b = area
+                x = max(left + dp(4), min(x, right - self.USAGE_W - dp(4)))
+                if y < mon_top + dp(4):
+                    y = bottom + dp(6)
             self._usage_window.geometry(f"+{x}+{y}")
         except Exception:
             pass
@@ -2481,7 +2623,7 @@ class CrabPet:
 
         self.mcp_title_label = tk.Label(
             inner, text="MCP needs reauth",
-            bg=GLASS_FILL, fg=GLASS_FG, font=("Segoe UI", 10, "bold"),
+            bg=GLASS_FILL, fg=GLASS_FG, font=(GLASS_FONT_MED, 10),
         )
         self.mcp_title_label.pack(pady=(dp(3), dp(10)))
 
@@ -2654,7 +2796,7 @@ class CrabPet:
         self.emote_label.config(
             image="", text=text,
             bg=GLASS_FILL, fg=GLASS_FG,
-            font=("Segoe UI", 9, "bold"),
+            font=(GLASS_FONT_MED, 9),
             padx=dp(10), pady=dp(4),
         )
         self._update_emote_position()
@@ -2753,17 +2895,14 @@ class CrabPet:
         pill = self.pills.get(label_key)
         if not pill:
             return
-        label = pill["label"]
+        row = pill["frame"]
 
-        def flash(color, fg, then_ms, after_fn):
-            if label.winfo_exists():
-                try:
-                    label.config(bg=color, fg=fg)
-                    # Repaint the glass card in the flash colour too, so the
-                    # whole pill tints rather than just the text's backing.
-                    self._refit_pill(pill, fill=color)
-                except tk.TclError:
-                    pass
+        def flash(color, then_ms, after_fn):
+            try:
+                if row.winfo_exists():
+                    row.configure(bg=color)
+            except tk.TclError:
+                pass
             self.root.after(then_ms, after_fn)
 
         def finalize():
@@ -2777,10 +2916,11 @@ class CrabPet:
                 except tk.TclError:
                     pass
                 del self.pills[label_key]
+            self._layout_card()
+            self._update_pill_window()
             self._reanchor()
 
-        flash("#ff9933", "white", 90,
-              lambda: flash("#ff5555", "white", 90, finalize))
+        flash("#5c4520", 90, lambda: flash("#6e2a2e", 90, finalize))
 
     # ---------- chime ----------
 

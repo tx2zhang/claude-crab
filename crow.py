@@ -227,6 +227,7 @@ class Painter:
         self.fx = Image.new("RGBA", size, (0, 0, 0, 0))   # no outline (confetti, Zzz)
         self.d = ImageDraw.Draw(self.img)
         self.dfx = ImageDraw.Draw(self.fx)
+        self.lw = 1.0          # line-width multiplier (crow scale)
 
     @staticmethod
     def _px(pts):
@@ -238,7 +239,7 @@ class Painter:
     def line(self, pts, fill, width, fx=False):
         px = self._px(pts)
         d = self.dfx if fx else self.d
-        w = width * SS
+        w = width * self.lw * SS
         d.line(px, fill=fill, width=max(1, round(w)), joint="curve")
         r = w / 2
         for x, y in (px[0], px[-1]):
@@ -332,7 +333,8 @@ def pose(**kw):
              eye="open", look=(0.0, 0.0), beak=0.0,
              legs="stand", leg_swing=0.0,
              laptop=False, key=None, scroll=0.0,
-             nest=False, cap=False, cap_sway=0.0, zzz=None, confetti=None)
+             nest=False, cap=False, cap_sway=0.0, zzz=None, confetti=None,
+             k=1.0, perch=None, hat=False, cauldron=None)
     p.update(kw)
     return p
 
@@ -371,7 +373,7 @@ def _tail(pt, B, wag):
     pt.line(tf(m, [(25.0, 72.0), (6.5, 79.0)]), FEATHER_LN, 0.55)
 
 
-def _legs(pt, B, P):
+def _legs(pt, B, W0, k, P):
     mode = P["legs"]
     if mode == "none":
         return
@@ -379,12 +381,12 @@ def _legs(pt, B, P):
         hip = ap(B, (hx, 76.5))
         if mode == "dangle":
             ang = math.radians(P["leg_swing"] + (6 if far else -4))
-            foot = (hip[0] + 12.5 * math.sin(ang), hip[1] + 12.5 * math.cos(ang))
+            foot = (hip[0] + 12.5 * k * math.sin(ang), hip[1] + 12.5 * k * math.cos(ang))
             curl = 40
         else:
-            foot = (fx_ + P["bx"], GROUND)
-            if foot[1] - hip[1] > 13.0:          # airborne: feet leave the ground
-                foot = (hip[0] - 1.0, hip[1] + 12.5)
+            foot = ap(W0, (fx_ + P["bx"], GROUND))
+            if foot[1] - hip[1] > 13.0 * k:      # airborne: feet leave the ground
+                foot = (hip[0] - k, hip[1] + 12.5 * k)
                 curl = 25
             else:
                 curl = 0
@@ -393,7 +395,7 @@ def _legs(pt, B, P):
         for tx, ty in toes:
             a = math.radians(curl)
             rx, ry = tx * math.cos(a) - ty * math.sin(a), tx * math.sin(a) + ty * math.cos(a)
-            pt.line([foot, (foot[0] + rx, foot[1] + ry)], col, 1.5)
+            pt.line([foot, (foot[0] + rx * k, foot[1] + ry * k)], col, 1.5)
 
 
 def _eye(pt, Hd, state, look):
@@ -556,9 +558,208 @@ def _confetti(pt, t):
         pt.poly(tf(m, piece), col, fx=True)
 
 
+HAT_TOP    = (112, 66, 160)
+HAT_BOT    = (46, 24, 74)
+HAT_BAND   = (26, 14, 36)
+BUCKLE     = (240, 190, 80)
+
+
+def _hat(pt, Hd):
+    """Purple witch hat with a floppy tip and a gold buckle (head-local)."""
+    cone = [(53.5, 27.5), (54.2, 18.5), (55.4, 11.5), (51.2, 6.0), (58.0, 6.6),
+            (62.2, 10.6), (65.8, 17.0), (68.8, 25.0)]
+    pt.gradient([tf(Hd, cone)], HAT_TOP, HAT_BOT)
+    pt.poly(tf(Hd, [(53.7, 26.0), (68.4, 23.2), (67.7, 20.8), (54.0, 23.5)]), HAT_BAND)
+    m = chain(Hd, T(61.2, 23.6), R(-11))
+    pt.poly(tf(m, [(-1.9, -1.6), (1.9, -1.6), (1.9, 1.6), (-1.9, 1.6)]), BUCKLE)
+    pt.poly(tf(m, [(-0.9, -0.7), (0.9, -0.7), (0.9, 0.7), (-0.9, 0.7)]), HAT_BAND)
+    pt.gradient([tf(Hd, ell(61.0, 27.2, 15.5, 3.3, -12))], HAT_TOP, HAT_BOT)
+
+
+# ---------- cauldron (Halloween brewing) ----------
+
+POT_C = (78.0, 62.0)            # rim centre
+POT_RX, POT_RY = 33.0, 7.0
+LIQ_RX, LIQ_RY = 28.0, 5.0
+PERCH = (51.0, 61.0)            # where the crow's feet sit on the rim
+SUMMON = (97.0, 13.0)           # where items materialise
+SPLASH_AT = (88.0, 62.8)
+
+IRON_TOP  = (74, 76, 92)
+IRON_BOT  = (16, 17, 22)
+LIP_TOP   = (110, 114, 132)
+LIP_BOT   = (46, 48, 58)
+LIQ_TOP   = (200, 255, 150)
+LIQ_BOT   = (64, 196, 76)
+LIQ_HI    = (226, 255, 196)
+GLOW_LINE = (150, 240, 140)
+FIRE_OUT  = (255, 120, 28)
+FIRE_IN   = (255, 216, 80)
+LOG       = (112, 72, 42)
+LOG_DK    = (72, 45, 26)
+SPARK     = [(255, 243, 166), (205, 166, 255), (160, 255, 124)]
+STEAM     = [(194, 248, 180), (216, 188, 255)]
+DROP      = (141, 255, 106)
+
+#           cx   w   h0  cycles/loop phase
+FLAMES = [(67, 7, 8, 9, 0.3), (73, 8, 11, 11, 0.7), (79, 9, 13, 7, 0.0),
+          (85, 8, 11, 10, 0.5), (91, 7, 8, 13, 0.2)]
+
+
+def _flame(cx, base, w, h, lean):
+    return [(cx - w / 2, base), (cx - w * 0.55, base - h * 0.35), (cx - w * 0.25, base - h * 0.75),
+            (cx + lean, base - h), (cx + w * 0.3, base - h * 0.7), (cx + w * 0.55, base - h * 0.35),
+            (cx + w / 2, base)]
+
+
+def _arc(cx, cy, rx, ry, a0, a1, n=30):
+    return [(cx + rx * math.cos(a0 + (a1 - a0) * i / n), cy + ry * math.sin(a0 + (a1 - a0) * i / n))
+            for i in range(n + 1)]
+
+
+def _star(cx, cy, r, ang=0.0):
+    pts = []
+    for i in range(8):
+        a = math.radians(ang + i * 45)
+        rr = r if i % 2 == 0 else r * 0.38
+        pts.append((cx + rr * math.cos(a), cy + rr * math.sin(a)))
+    return pts
+
+
+def _cauldron_back(pt, C):
+    """Fire, logs, feet, the rim, and the bubbling potion surface."""
+    t = C["t"]
+    pt.line([(59, 94.5), (97, 91.5)], LOG_DK, 3.2)
+    pt.line([(59, 91.5), (97, 94.5)], LOG, 3.2)
+    for cx, w, h0, m, ph in FLAMES:
+        wob = math.sin(2 * math.pi * (m * t + ph))
+        h = h0 * (0.82 + 0.22 * wob)
+        lean = 1.6 * math.sin(2 * math.pi * (m * t + ph + 0.25))
+        pt.poly(_flame(cx, 94.0, w, h, lean), FIRE_OUT)
+        pt.poly(_flame(cx, 94.0, w * 0.55, h * 0.6, lean * 0.6), FIRE_IN)
+    for x, y in ((56, 89.6), (78, 91.0), (100, 89.6)):
+        pt.poly(ell(x, y, 4.2, 2.8), LIP_BOT)
+    cx, cy = POT_C
+    pt.gradient([ell(cx, cy, POT_RX, POT_RY)], LIP_TOP, LIP_BOT)
+    pt.gradient([ell(cx, cy + 0.6, LIQ_RX, LIQ_RY)], LIQ_TOP, LIQ_BOT)
+    a = 2 * math.pi * t
+    for j in range(2):                                 # slow swirl
+        a0 = a + j * math.pi
+        pts = [(cx + (5 + 15 * u) * math.cos(a0 + u * 3.0),
+                cy + 0.6 + (1.0 + 2.8 * u) * math.sin(a0 + u * 3.0))
+               for u in (i / 14 for i in range(15))]
+        pt.line(pts, LIQ_HI, 0.7)
+    rng = random.Random(5)
+    for _ in range(7):                                 # bubbles grow and pop
+        bx = rng.uniform(57, 100)
+        by = cy + 0.6 + rng.uniform(-2.0, 2.6)
+        m = rng.choice((3, 4, 5))
+        ph = rng.random()
+        u = (t * m + ph) % 1.0
+        if u < 0.7:
+            r = 0.6 + 1.7 * (u / 0.7)
+            pt.poly(ell(bx, by - r * 0.6, r, r), LIQ_HI)
+            pt.poly(ell(bx - r * 0.3, by - r * 0.95, r * 0.32, r * 0.32), (255, 255, 255))
+        elif u < 0.85:
+            ring = ell(bx, by - 1.0, 2.8, 1.1)
+            pt.line(ring + [ring[0]], LIQ_HI, 0.5)
+    if C["splash"] is not None:                        # ripple from the drop
+        p = C["splash"]
+        ring = ell(SPLASH_AT[0], SPLASH_AT[1], 3 + 12 * p, 1.0 + 2.4 * p)
+        pt.line(ring + [ring[0]], LIQ_HI, 0.8)
+
+
+def _cauldron_front(pt):
+    """The iron belly and front lip, drawn over anything sinking in."""
+    cx, cy = POT_C
+    front = _arc(cx, cy, POT_RX, POT_RY, math.pi, 0)          # left → right via the front
+    belly = _arc(cx, 75.0, 34.0, 14.0, 0, math.pi)            # right → left via the bottom
+    pt.gradient([front + belly], IRON_TOP, IRON_BOT)
+    lip = _arc(cx, cy + 0.8, POT_RX + 0.6, POT_RY + 1.7, math.pi, 0) + \
+        _arc(cx, cy, POT_RX, POT_RY, 0, math.pi)
+    pt.gradient([lip], LIP_TOP, LIP_BOT)
+    pt.line(_arc(cx, cy, POT_RX - 2.0, POT_RY - 0.6, math.pi * 0.82, math.pi * 0.18),
+            GLOW_LINE, 0.55)                                   # potion light on the lip
+    pt.sheen(ell(64, 76, 10, 4.5, -18), (170, 180, 210, 70), blur=1.6)
+
+
+def _item(pt, kind, cx, cy, s, ang):
+    """Spooky ingredients: candy corn, eyeball, toadstool, bone."""
+    m = chain(T(cx, cy), R(ang), S(s, s))
+    if kind == "candy":
+        apex, bl, br = (0.0, -6.5), (-5.0, 5.0), (5.0, 5.0)
+
+        def tri(f):
+            return [apex, (apex[0] + (bl[0] - apex[0]) * f, apex[1] + (bl[1] - apex[1]) * f),
+                    (apex[0] + (br[0] - apex[0]) * f, apex[1] + (br[1] - apex[1]) * f)]
+        pt.poly(tf(m, tri(1.0)), (255, 205, 70))
+        pt.poly(tf(m, tri(0.68)), (255, 136, 38))
+        pt.poly(tf(m, tri(0.34)), (252, 249, 238))
+    elif kind == "eye":
+        pt.poly(tf(m, ell(0, 0, 5.2, 5.2)), (248, 246, 240))
+        pt.line(tf(m, qbez((-4.4, -1.8), (-3.0, -0.5), (-2.3, 0.6))), (220, 70, 70), 0.5)
+        pt.line(tf(m, qbez((-3.6, 3.0), (-2.6, 2.2), (-2.0, 1.2))), (220, 70, 70), 0.5)
+        pt.poly(tf(m, ell(1.3, 0, 2.7, 2.7)), (196, 54, 60))
+        pt.poly(tf(m, ell(1.6, 0, 1.3, 1.3)), (18, 16, 20))
+        pt.poly(tf(m, ell(2.3, -0.9, 0.6, 0.6)), (255, 255, 255))
+    elif kind == "mushroom":
+        pt.poly(tf(m, [(-2.0, 0.0), (2.0, 0.0), (2.4, 5.6), (-2.4, 5.6)]), (238, 224, 196))
+        cap = [(6.2 * math.cos(a), -0.3 - 5.0 * math.sin(a))
+               for a in (math.pi * i / 20 for i in range(21))]
+        pt.poly(tf(m, cap), (214, 48, 62))
+        for x, y, r in ((-2.6, -2.4, 1.1), (1.2, -3.6, 0.9), (3.4, -1.4, 0.8)):
+            pt.poly(tf(m, ell(x, y, r, r)), (252, 244, 236))
+    elif kind == "bone":
+        pt.poly(tf(m, capsule((-5.0, 0.0), (5.0, 0.0), 1.6)), (240, 234, 220))
+        for x in (-5.6, 5.6):
+            for y in (-1.6, 1.6):
+                pt.poly(tf(m, ell(x, y, 1.9, 1.9)), (240, 234, 220))
+
+
+def _cauldron_fx(pt, C):
+    """Steam, twinkles, the summoning sparkle ring, splash droplets."""
+    t = C["t"]
+    rng = random.Random(9)
+    for i in range(6):
+        x0 = rng.uniform(74, 104)
+        m = rng.choice((2, 3))
+        ph = rng.random()
+        u = (t * m + ph) % 1.0
+        if u > 0.9:
+            continue
+        x = x0 + 3 * math.sin(2 * math.pi * (u * 1.5 + ph))
+        r = 2.6 * (1 - u) + 0.5
+        pt.poly(ell(x, 58 - u * 34, r, r * 0.8), STEAM[i % 2], fx=True)
+    for i, (x, y) in enumerate(((47, 50), (109, 53), (66, 46), (104, 40))):
+        sv = math.sin(2 * math.pi * (t * 5 + i * 0.27))
+        if sv > 0.2:
+            pt.poly(_star(x, y, 1.0 + 1.6 * sv, 15 * i), SPARK[i % 3], fx=True)
+    if C["cast"] > 0.02:
+        cs = C["cast"]
+        for j in range(6):
+            a = 360 * t * 4 + j * 60
+            r = 4 + 4 * cs
+            x = SUMMON[0] + r * math.cos(math.radians(a))
+            y = SUMMON[1] + r * 0.7 * math.sin(math.radians(a))
+            pt.poly(_star(x, y, 0.8 + 1.4 * cs, a), SPARK[j % 3], fx=True)
+    if C["splash"] is not None and C["splash"] < 0.99:
+        p = C["splash"]
+        rng = random.Random(3)
+        for _ in range(8):
+            a = math.radians(rng.uniform(-160, -20))
+            v = rng.uniform(6, 11)
+            x = SPLASH_AT[0] + math.cos(a) * v * p * 1.4
+            y = SPLASH_AT[1] + math.sin(a) * v * p * 1.4 + 14 * p * p
+            r = 1.3 * (1 - p) + 0.4
+            pt.poly(ell(x, y, r, r), DROP, fx=True)
+
+
 def draw_crow(P):
     pt = Painter()
-    B = chain(T(P["bx"], P["by"]), R(P["rot"], *HIP), S(P["sx"], P["sy"], HIP[0], GROUND))
+    k = P["k"]
+    px_, py_ = P["perch"] or (44.0, GROUND)
+    W0 = chain(T(px_ - 44.0, py_ - GROUND), S(k, k, 44.0, GROUND))   # perch + scale
+    B = chain(W0, T(P["bx"], P["by"]), R(P["rot"], *HIP), S(P["sx"], P["sy"], HIP[0], GROUND))
     Hd = chain(B, T(P["head_dx"], P["head_dy"]), R(P["head_rot"], *NECK))
     Wn = chain(B, T(*SHOULDER), R(P["wing"]))
     fw = P["far_wing"] if P["far_wing"] is not None else P["wing"] + 6
@@ -568,9 +769,16 @@ def draw_crow(P):
         _laptop(pt, P)
     if P["nest"]:
         _nest_back(pt)
+    C = P["cauldron"]
+    if C is not None:
+        _cauldron_back(pt, C)
+        if C["item"] is not None:
+            _item(pt, *C["item"])
+        _cauldron_front(pt)
+    pt.lw = k
     _wing(pt, Wf, P["spread"], far=True)
     _tail(pt, B, P["tail"])
-    _legs(pt, B, P)
+    _legs(pt, B, W0, k, P)
 
     # Body, neck and head share one silhouette + one gradient so they read
     # as a single smooth shape.
@@ -592,6 +800,11 @@ def draw_crow(P):
     _eye(pt, Hd, P["eye"], P["look"])
     if P["cap"]:
         _cap(pt, Hd, P["cap_sway"])
+    if P["hat"]:
+        _hat(pt, Hd)
+    pt.lw = 1.0
+    if C is not None:
+        _cauldron_fx(pt, C)
     if P["zzz"] is not None:
         _zzz(pt, P["zzz"], Hd)
     if P["confetti"] is not None:
@@ -620,7 +833,7 @@ def anim_idle(n=30):
 KEY_SEQ = [(1, 1), (0, 2), (1, 0)]
 # Head poses (body rot, head rot, head dx, head dy). CONTACT puts the beak tip
 # on the keys; HOVER sits just above them; THINK is head up, eyeing the screen.
-THINK = (2.0, -3.0, 0.5, 0.0)
+THINK = (2.8, 19.0, 1.9, 1.6)      # only half-raised: a calm glance at the screen
 HOVER = (3.5, 41.0, 3.3, 3.2)
 CONTACT = (4.0, 48.0, 4.0, 4.0)
 TAP = [0.0, 0.55, 1.0, 0.6, 0.2, 0.0]   # one small, quick peck (6 frames)
@@ -655,7 +868,7 @@ def anim_typing():
         else:                                           # stop and think
             u = (f - lower - taps - lift) / (think - 1)
             head = THINK
-            ponder = -4.0 * math.sin(math.pi * u)       # slow thoughtful tilt
+            ponder = -3.0 * math.sin(math.pi * u)       # slow thoughtful tilt
             eye = "closed" if 0.42 <= u < 0.55 else "open"
             look = (1.5, -0.5)
             scroll = 3.0
@@ -728,9 +941,54 @@ def anim_hop(n=8):
                  eye="open") for f in range(n)]
 
 
+ITEMS = ["candy", "eye", "mushroom", "bone"]
+
+
+def anim_brewing(per=16):
+    """Perched on a cauldron in a witch hat: raise a wing, conjure an
+    ingredient in a ring of sparkles, drop it in, splash, watch it sink."""
+    out = []
+    n = per * len(ITEMS)
+    for f in range(n):
+        t = f / n
+        i, c = divmod(f, per)
+        kind = ITEMS[i]
+        item, splash, cast = None, None, 0.0
+        if c <= 3:                                     # raise wing, start the spell
+            u = ease(c / 3)
+            wing, head, beak, cast = 6 + 80 * u, -10 * u, 0.55 * u, u
+            look = (1.6, -1.8 * u)
+        elif c <= 6:                                   # ingredient appears
+            u = (c - 4) / 2
+            wing, head, beak, cast = 86 + 4 * math.sin(u * math.pi), -10, 0.55, 1.0
+            item = (kind, SUMMON[0], SUMMON[1] + 1.2 * math.sin(u * math.pi),
+                    1.3 * (0.35 + 0.65 * ease(u)), 0)
+            look = (1.6, -1.8)
+        elif c <= 11:                                  # it tumbles into the pot
+            u = (c - 6) / 5
+            wing, head, beak = 86 - 78 * ease(u), -10 + 22 * ease(u), 0.55 * (1 - u)
+            cast = max(0.0, 1 - u * 2.5)
+            item = (kind, SUMMON[0] + (SPLASH_AT[0] - SUMMON[0]) * u,
+                    SUMMON[1] + (SPLASH_AT[1] - 2 - SUMMON[1]) * u * u, 1.3, 220 * u)
+            look = (1.4, -1.8 + 3.4 * u)
+        else:                                          # splash, then settle back
+            u = (c - 11) / 4
+            splash = u
+            wing, beak = 8 - 2 * u, 0.0
+            head = 12 * (1 - ease(max(0.0, (c - 13) / 2)))
+            look = (1.4, 1.6 * (1 - u))
+        out.append(pose(k=0.7, perch=PERCH, rot=4, hat=True,
+                        wing=wing, far_wing=10, spread=cast * 0.8,
+                        head_rot=head, beak=beak, eye="open", look=look,
+                        tail=2 * math.sin(2 * math.pi * t * 4),
+                        cauldron=dict(t=t, item=item, cast=cast, splash=splash)))
+    return out
+
+
 BUILDERS = {
     "idle": anim_idle,
     "typing": anim_typing,
+    "brewing": anim_brewing,
     "sleeping": anim_sleeping,
     "cheer": anim_cheer,
     "dangle": anim_dangle,
@@ -740,6 +998,7 @@ BUILDERS = {
 INTERVALS = {
     "standing": 80,
     "typing": 65,
+    "brewing": 70,
     "sleeping": 90,
     "cheer": 60,
     "dangle": 45,
