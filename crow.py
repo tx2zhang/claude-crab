@@ -23,7 +23,8 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
-W, H = 120, 96          # design size (px at 100% display scaling)
+W, H = 128, 96          # design size (px at 100% display scaling)
+OX = 6                  # shift all art right: room for the tail when leaning in
 GROUND = 88             # y of the feet
 
 # Output resolution follows the display scale (see configure). Shapes are
@@ -229,7 +230,7 @@ class Painter:
 
     @staticmethod
     def _px(pts):
-        return [(x * SS, y * SS) for x, y in pts]
+        return [((x + OX) * SS, y * SS) for x, y in pts]
 
     def poly(self, pts, fill, fx=False):
         (self.dfx if fx else self.d).polygon(self._px(pts), fill=fill)
@@ -287,7 +288,7 @@ class Painter:
         self.d = ImageDraw.Draw(self.img)
 
     def text(self, x, y, s, size, fill, stroke=None):
-        self.dfx.text((x * SS, y * SS), s, font=_font(int(size * SS)), fill=fill,
+        self.dfx.text(((x + OX) * SS, y * SS), s, font=_font(int(size * SS)), fill=fill,
                       anchor="mm", stroke_width=int(1.1 * SS) if stroke else 0,
                       stroke_fill=stroke)
 
@@ -479,11 +480,10 @@ def _key_quad(r, c, inset=0.13):
     return [pt_uv(u0, v0), pt_uv(u1, v0), pt_uv(u1, v1), pt_uv(u0, v1)]
 
 
-CODE_LINES = [  # (indent, [(len, color_idx), ...]) — period of 4 for a seamless scroll
+CODE_LINES = [  # (indent, [(len, color_idx), ...]) — period 3 = pecks per loop
     (0, [(5, 0), (9, 1), (3, 3)]),
     (3, [(7, 1), (6, 2)]),
-    (3, [(4, 0), (11, 1)]),
-    (6, [(8, 2), (4, 1)]),
+    (6, [(4, 0), (11, 1)]),
 ]
 
 
@@ -617,23 +617,52 @@ def anim_idle(n=30):
     return out
 
 
-KEY_SEQ = [(1, 1), (0, 2), (1, 0), (0, 1)]
-PECK = [0.0, -0.14, -0.24, -0.18, 0.72, 1.0, 0.74, 0.44, 0.2, 0.06]
+KEY_SEQ = [(1, 1), (0, 2), (1, 0)]
+# Head poses (body rot, head rot, head dx, head dy). CONTACT puts the beak tip
+# on the keys; HOVER sits just above them; THINK is head up, eyeing the screen.
+THINK = (2.0, -3.0, 0.5, 0.0)
+HOVER = (3.5, 41.0, 3.3, 3.2)
+CONTACT = (4.0, 48.0, 4.0, 4.0)
+TAP = [0.0, 0.55, 1.0, 0.6, 0.2, 0.0]   # one small, quick peck (6 frames)
 
 
-def anim_typing(n=40):
-    """Pecking away at a laptop; each peck lights a key and scrolls the code."""
+def _mix(a, b, t):
+    return tuple(x + (y - x) * t for x, y in zip(a, b))
+
+
+def anim_typing():
+    """Gentle typing: lower the head, peck peck peck (each lights a key and
+    scrolls the code a line), lift up and ponder the screen, repeat."""
     out = []
+    lower, taps, lift, think = 6, 18, 6, 12
+    n = lower + taps + lift + think
     for f in range(n):
-        c, k = f % 10, f // 10
-        cv = PECK[c]
-        scroll = k + ease((c - 5) / 3.0) if c >= 5 else k
-        out.append(pose(bx=-3.0, rot=2 + 2 * cv, head_rot=2 + 46 * cv,
-                        head_dx=4 * cv, head_dy=4 * cv,
-                        wing=3 + 7 * max(0.0, cv), tail=-4 * cv,
-                        eye="open", look=(1.3, 1.5),
-                        laptop=True, key=KEY_SEQ[k] if c in (5, 6) else None,
-                        scroll=scroll))
+        key, look, eye, ponder = None, (1.3, 1.5), "open", 0.0
+        if f < lower:                                   # settle down to the keys
+            head = _mix(THINK, HOVER, ease(f / (lower - 1)))
+            scroll = 0.0
+        elif f < lower + taps:                          # peck peck peck
+            k, c = divmod(f - lower, len(TAP))
+            head = _mix(HOVER, CONTACT, TAP[c])
+            if c in (2, 3):
+                key = KEY_SEQ[k]
+            scroll = k + (ease((c - 2) / 3.0) if c >= 2 else 0.0)
+        elif f < lower + taps + lift:                   # lift up
+            u = (f - lower - taps) / (lift - 1)
+            head = _mix(HOVER, THINK, ease(u))
+            scroll = 3.0
+            look = (1.3 + 0.2 * u, 1.5 - 2.0 * u)
+        else:                                           # stop and think
+            u = (f - lower - taps - lift) / (think - 1)
+            head = THINK
+            ponder = -4.0 * math.sin(math.pi * u)       # slow thoughtful tilt
+            eye = "closed" if 0.42 <= u < 0.55 else "open"
+            look = (1.5, -0.5)
+            scroll = 3.0
+        rot, hr, dx, dy = head
+        out.append(pose(bx=-3.0, rot=rot, head_rot=hr + ponder, head_dx=dx,
+                        head_dy=dy, wing=3.0, tail=-1.5 * math.sin(2 * math.pi * f / n),
+                        eye=eye, look=look, laptop=True, key=key, scroll=scroll))
     return out
 
 
@@ -710,7 +739,7 @@ BUILDERS = {
 
 INTERVALS = {
     "standing": 80,
-    "typing": 55,
+    "typing": 65,
     "sleeping": 90,
     "cheer": 60,
     "dangle": 45,
