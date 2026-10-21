@@ -665,7 +665,7 @@ def _cauldron_back(pt, C):
             pt.line(ring + [ring[0]], LIQ_HI, 0.5)
     if C["splash"] is not None:                        # ripple from the drop
         p = C["splash"]
-        ring = ell(SPLASH_AT[0], SPLASH_AT[1], 3 + 12 * p, 1.0 + 2.4 * p)
+        ring = ell(SPLASH_AT[0], SPLASH_AT[1], 3 + 9 * p, 1.0 + 1.8 * p)
         pt.line(ring + [ring[0]], LIQ_HI, 0.8)
 
 
@@ -721,7 +721,7 @@ def _cauldron_fx(pt, C):
     t = C["t"]
     rng = random.Random(9)
     for i in range(6):
-        x0 = rng.uniform(74, 104)
+        x0 = rng.uniform(91, 106)      # clear of the crow's beak
         m = rng.choice((2, 3))
         ph = rng.random()
         u = (t * m + ph) % 1.0
@@ -745,9 +745,9 @@ def _cauldron_fx(pt, C):
     if C["splash"] is not None and C["splash"] < 0.99:
         p = C["splash"]
         rng = random.Random(3)
-        for _ in range(8):
-            a = math.radians(rng.uniform(-160, -20))
-            v = rng.uniform(6, 11)
+        for _ in range(5):
+            a = math.radians(rng.uniform(-150, -30))
+            v = rng.uniform(3.5, 6.5)
             x = SPLASH_AT[0] + math.cos(a) * v * p * 1.4
             y = SPLASH_AT[1] + math.sin(a) * v * p * 1.4 + 14 * p * p
             r = 1.3 * (1 - p) + 0.4
@@ -944,9 +944,11 @@ def anim_hop(n=8):
 ITEMS = ["candy", "eye", "mushroom", "bone"]
 
 
-def anim_brewing(per=16):
-    """Perched on a cauldron in a witch hat: raise a wing, conjure an
-    ingredient in a ring of sparkles, drop it in, splash, watch it sink."""
+def anim_brewing(per=30):
+    """Calm brewing loop. The crow mostly holds still on the rim (eyes follow
+    the ingredient, a tiny nod, one blink); each ingredient fades in inside a
+    soft sparkle ring, hovers, drifts slowly into the pot with a small splash,
+    then a rest beat. Long loop on purpose: ambient, not distracting."""
     out = []
     n = per * len(ITEMS)
     for f in range(n):
@@ -954,33 +956,35 @@ def anim_brewing(per=16):
         i, c = divmod(f, per)
         kind = ITEMS[i]
         item, splash, cast = None, None, 0.0
-        if c <= 3:                                     # raise wing, start the spell
-            u = ease(c / 3)
-            wing, head, beak, cast = 6 + 80 * u, -10 * u, 0.55 * u, u
-            look = (1.6, -1.8 * u)
-        elif c <= 6:                                   # ingredient appears
-            u = (c - 4) / 2
-            wing, head, beak, cast = 86 + 4 * math.sin(u * math.pi), -10, 0.55, 1.0
-            item = (kind, SUMMON[0], SUMMON[1] + 1.2 * math.sin(u * math.pi),
-                    1.3 * (0.35 + 0.65 * ease(u)), 0)
-            look = (1.6, -1.8)
-        elif c <= 11:                                  # it tumbles into the pot
-            u = (c - 6) / 5
-            wing, head, beak = 86 - 78 * ease(u), -10 + 22 * ease(u), 0.55 * (1 - u)
-            cast = max(0.0, 1 - u * 2.5)
+        if c < 6:                                       # sparkle ring, item fades in
+            u = ease(c / 5)
+            cast = u
+            item = (kind, SUMMON[0], SUMMON[1], 1.3 * (0.3 + 0.7 * u), 0)
+            follow = 0.0
+        elif c < 12:                                    # hover with a gentle bob
+            u = (c - 6) / 6
+            cast = 1 - u
+            item = (kind, SUMMON[0], SUMMON[1] + 0.8 * math.sin(u * math.pi), 1.3, 0)
+            follow = 0.0
+        elif c < 24:                                    # slow eased drift into the pot
+            u = ease((c - 12) / 11)
             item = (kind, SUMMON[0] + (SPLASH_AT[0] - SUMMON[0]) * u,
-                    SUMMON[1] + (SPLASH_AT[1] - 2 - SUMMON[1]) * u * u, 1.3, 220 * u)
-            look = (1.4, -1.8 + 3.4 * u)
-        else:                                          # splash, then settle back
-            u = (c - 11) / 4
-            splash = u
-            wing, beak = 8 - 2 * u, 0.0
-            head = 12 * (1 - ease(max(0.0, (c - 13) / 2)))
-            look = (1.4, 1.6 * (1 - u))
+                    SUMMON[1] + (SPLASH_AT[1] - 2 - SUMMON[1]) * u, 1.3, 50 * u)
+            follow = u
+        elif c < 28:                                    # small soft splash
+            splash = (c - 23) / 5
+            follow = 1.0
+        else:                                           # rest beat
+            follow = 1.0 - (c - 27) / 3
+        # The crow barely moves: a small nod as the ingredient goes in, eyes
+        # tracking it, slow breathing, one blink per loop.
+        breath = math.sin(2 * math.pi * t * 3)
+        eye = "closed" if f in (n // 2 - 1, n // 2) else "open"
         out.append(pose(k=0.7, perch=PERCH, rot=4, hat=True,
-                        wing=wing, far_wing=10, spread=cast * 0.8,
-                        head_rot=head, beak=beak, eye="open", look=look,
-                        tail=2 * math.sin(2 * math.pi * t * 4),
+                        by=-0.3 * breath, sy=1 + 0.008 * breath,
+                        wing=6, far_wing=10, head_rot=1 + 5 * follow,
+                        eye=eye, look=(1.6, -1.8 + 3.4 * follow),
+                        tail=0.8 * breath,
                         cauldron=dict(t=t, item=item, cast=cast, splash=splash)))
     return out
 
@@ -998,7 +1002,7 @@ BUILDERS = {
 INTERVALS = {
     "standing": 80,
     "typing": 65,
-    "brewing": 70,
+    "brewing": 80,
     "sleeping": 90,
     "cheer": 60,
     "dangle": 45,
