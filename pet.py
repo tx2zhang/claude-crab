@@ -60,7 +60,7 @@ try:
 except ImportError:
     winsound = None
 
-from PIL import Image, ImageDraw, ImageFont, ImageTk
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageTk
 
 # Optional companions living next to pet.py: the vector crow character and
 # the local usage stats behind the click-to-open usage panel.
@@ -294,6 +294,48 @@ def _mix_hex(a, b, t):
     ca = [int(a[i:i + 2], 16) for i in (1, 3, 5)]
     cb = [int(b[i:i + 2], 16) for i in (1, 3, 5)]
     return "#" + "".join(f"{int(x + (y - x) * t):02x}" for x, y in zip(ca, cb))
+
+
+def _orb_image(color, d):
+    """Status dot as a little lit sphere: key light from the top-left, a glossy
+    highlight, a soft bounce light low on the far side and a faint contact
+    shadow. Returns an RGBA image (d plus shadow padding), sphere centred."""
+    S = 4
+    pad = max(2, round(d * 0.35))
+    n = (d + 2 * pad) * S
+    base = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    lx, ly, lz = -0.45, -0.62, 0.64
+    ll = math.sqrt(lx * lx + ly * ly + lz * lz)
+    lx, ly, lz = lx / ll, ly / ll, lz / ll
+    img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+    sh = Image.new("L", (n, n), 0)               # contact shadow, a touch below
+    c, R = n / 2, d * S / 2
+    ImageDraw.Draw(sh).ellipse([c - R * 0.92, c - R * 0.7 + R * 0.38, c + R * 0.92, c + R * 1.1 + R * 0.38], fill=120)
+    sh = sh.filter(ImageFilter.GaussianBlur(R * 0.35))
+    img.paste((0, 0, 0, 255), (0, 0), sh)
+    px = img.load()
+    for yy in range(n):
+        y = (yy + 0.5 - c) / R
+        for xx in range(n):
+            x = (xx + 0.5 - c) / R
+            q = x * x + y * y
+            if q > 1:
+                continue
+            z = math.sqrt(1 - q)
+            dif = max(0.0, x * lx + y * ly + z * lz)
+            rz = 2 * dif * z - lz                  # reflection · view (view = +z)
+            spec = max(0.0, rz) ** 16
+            bounce = max(0.0, x * 0.35 + y * 0.75 + z * 0.3) ** 2 * 0.22
+            rim = 1 - 0.35 * (1 - z) ** 2           # darken toward the silhouette
+            out = []
+            for b in base:
+                v = b * (0.32 + 0.82 * dif) * rim + (b * 0.5 + 0.5) * bounce
+                v = v + (1 - v) * spec * 0.9
+                out.append(int(max(0.0, min(1.0, v)) * 255))
+            px[xx, yy] = (*out, 255)
+    return img.convert("RGBa").resize((n // S, n // S), Image.LANCZOS).convert("RGBA")
+
+
 GLASS_PAD    = dp(12)         # inset between the card edge and its content
 
 
@@ -1583,8 +1625,7 @@ class CrabPet:
             c.configure(width=row_w, height=ROW_H, bg=cs["fill"])
             if i:
                 c.create_line(TEXT_X, 0, row_w - dp(4), 0, fill=cs["divider"])
-            p["dot"] = c.create_oval(DOT_X - r, mid - r, DOT_X + r, mid + r,
-                                     fill=color, outline=color)
+            p["dot"] = c.create_image(DOT_X, mid, image=self._orb(color))
             c.create_text(TEXT_X, mid, text=title, anchor="w", fill=cs["fg"], font=ft)
             urgent = p.get("state") in ("attention", "permission")
             c.create_text(row_w - dp(12), mid, text=label, anchor="e",
@@ -1601,6 +1642,13 @@ class CrabPet:
         self.card_canvas.coords(self._card_content_item, mx + cs["px"], mt + cs["py"])
         self._tail_x = cw // 2
         self._draw_card()
+
+    def _orb(self, color):
+        """Cached PhotoImage of the 3D status dot in this colour."""
+        cache = self.__dict__.setdefault("_orbs", {})
+        if color not in cache:
+            cache[color] = ImageTk.PhotoImage(_orb_image(color, dp(10)))
+        return cache[color]
 
     def _row_hover(self, row, on):
         row.configure(bg=self._cs["hover" if on else "fill"])
@@ -1650,11 +1698,11 @@ class CrabPet:
         """Gently pulse the dot of every working row."""
         k = 0.5 + 0.5 * math.sin(time.time() * 2 * math.pi / 1.6)
         base = self._cs["status"]["working"][1]
-        col = _mix_hex(base, self._cs["fill"], 0.55 * (1 - k))
+        col = _mix_hex(base, self._cs["fill"], round(0.55 * (1 - k) * 8) / 8)   # 9 cached shades
         for p in self.pills.values():
             if p.get("state") in ("working", "tool") and p.get("dot"):
                 try:
-                    p["canvas"].itemconfig(p["dot"], fill=col, outline=col)
+                    p["canvas"].itemconfig(p["dot"], image=self._orb(col))
                 except tk.TclError:
                     pass
         self.root.after(90, self._pulse_tick)
