@@ -830,6 +830,54 @@ def draw_crow(P):
     return pt.finish()
 
 
+# ---------- loose feathers (shake burst) ----------
+
+def _feather(k, ang):
+    """One loose crow feather, rotated by ang degrees. k = device px per
+    design unit. Same sticker edge (ink + light rim) as the crow."""
+    D = int(26 * k) + 6
+    S = 4
+    img = Image.new("RGBA", (D * S, D * S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    c = D / 2
+    t = math.radians(ang)
+    ca, sa = math.cos(t), math.sin(t)
+
+    def P(x, y):
+        x, y = x * k, y * k
+        return ((c + x * ca - y * sa) * S, (c + x * sa + y * ca) * S)
+
+    left = [(0, -9.5), (-1.4, -8), (-2.8, -5), (-3.5, -1), (-3.2, 3), (-1.8, 6.2), (0, 7)]
+    right = [(1.3, 6), (2.3, 3), (2.6, -1), (2.1, -5), (1.1, -8)]
+    w = lambda v: max(1, round(v * k * S))
+    d.polygon([P(*q) for q in left + right], fill=(30, 32, 42))
+    d.polygon([P(*q) for q in left], fill=(52, 56, 74))                  # lit half
+    for x0, y0, x1, y1 in ((-3.3, -2, -1.2, -3.4), (-2.6, 3.2, -0.8, 1.8), (2.4, 0.4, 0.8, -0.8)):
+        d.line([P(x0, y0), P(x1, y1)], fill=(16, 17, 23), width=w(0.5))  # split barbs
+    d.line([P(-1.6, -6.2), P(-2.3, 0)], fill=(116, 134, 210), width=w(0.7))  # sheen
+    d.line([P(0, -9), P(0, 10)], fill=(156, 164, 190), width=w(0.55))       # quill
+    small = img.convert("RGBa").resize((D, D), Image.LANCZOS).convert("RGBA")
+    solid = small.getchannel("A").point(lambda v: 255 if v > 24 else 0)
+    ink_ring = solid.filter(ImageFilter.MaxFilter(3))
+    rim_ring = ink_ring.filter(ImageFilter.MaxFilter(3))
+    out = Image.new("RGBA", (D, D), RIM + (0,))
+    out.putalpha(rim_ring)
+    ink = Image.new("RGBA", (D, D), INK + (0,))
+    ink.putalpha(ink_ring)
+    out = Image.alpha_composite(Image.alpha_composite(out, ink), small)
+    out.putalpha(out.getchannel("A").point(lambda v: 255 if v >= 128 else 0))
+    return out
+
+
+FEATHER_ANGLES = 24
+
+
+def feather_frames(scale=1.0):
+    """{size: [PIL image per 15° of rotation]} for the shake-burst feathers."""
+    return {sz: [_feather(scale * sz, 360 * i / FEATHER_ANGLES) for i in range(FEATHER_ANGLES)]
+            for sz in (1.0, 0.75)}
+
+
 # ---------- animations ----------
 
 def anim_idle(n=30):

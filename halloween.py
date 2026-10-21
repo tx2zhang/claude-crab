@@ -11,7 +11,10 @@ import math
 
 from PIL import Image, ImageDraw, ImageFilter
 
-FILL = (26, 19, 37)            # card body; rows use the same colour
+FILL = (26, 19, 37)            # flat fallback colour for rows
+GRAD_TOP = (46, 28, 74)        # body gradient: twilight violet at the top...
+GRAD_BOT = (16, 11, 24)        # ...to near-black midnight at the bottom
+GLOW = (255, 120, 30)           # faint pumpkin glow along the bottom edge
 HOVER = (42, 31, 58)
 DIVIDER = (46, 35, 66)
 ORANGE = (255, 138, 43)
@@ -106,9 +109,29 @@ def _sparkle(d, cx, cy, r, S):
     d.polygon(pts, fill=GOLD)
 
 
-def card_chrome(cw, ch, tail_x, tail_w, tail_h, radius, u):
+def _body_gradient(size, x0, y0, x1, y1, lift, S):
+    """Vertical violet→midnight gradient for the card body, plus a soft
+    pumpkin glow rising from the bottom edge. `lift` brightens it (hover)."""
+    W, H = size
+    col = Image.new("RGB", (1, H))
+    px = col.load()
+    for r in range(H):
+        t = min(1.0, max(0.0, (r - y0 * S) / max(1.0, (y1 - y0) * S)))
+        c = [GRAD_TOP[i] + (GRAD_BOT[i] - GRAD_TOP[i]) * t for i in range(3)]
+        px[0, r] = tuple(min(255, int(v + lift)) for v in c)
+    grad = col.resize((W, H)).convert("RGBA")
+    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(glow)
+    cx, gw, gh = (x0 + x1) / 2 * S, (x1 - x0) * 0.42 * S, (y1 - y0) * 0.55 * S
+    gd.ellipse([cx - gw, y1 * S - gh, cx + gw, y1 * S + gh], fill=GLOW + (34,))
+    glow = glow.filter(ImageFilter.GaussianBlur((y1 - y0) * 0.22 * S))
+    return Image.alpha_composite(grad, glow)
+
+
+def card_chrome(cw, ch, tail_x, tail_w, tail_h, radius, u, lift=0):
     """Full chrome image for a card of cw x ch device px. The card sits at
-    (mx, mt) inside the image; tail_x is measured from the card's left."""
+    (mx, mt) inside the image; tail_x is measured from the card's left.
+    lift > 0 renders a brighter body, used for hovered rows."""
     mx, mt, mb_extra = margins(u)
     W, H = cw + 2 * mx, mt + ch + tail_h + mb_extra
     S = 3
@@ -118,11 +141,22 @@ def card_chrome(cw, ch, tail_x, tail_w, tail_h, radius, u):
     lw = max(1, round(1.6 * u * S))
     thin = max(1, round(0.8 * u * S))
 
-    d.rounded_rectangle([x0 * S, y0 * S, x1 * S, y1 * S], radius=radius * S,
-                        fill=FILL, outline=ORANGE, width=lw)
     tx, hw = x0 + tail_x, tail_w / 2
-    d.polygon([((tx - hw) * S, (y1 - 1.5 * u) * S), ((tx + hw) * S, (y1 - 1.5 * u) * S),
-               (tx * S, (y1 + tail_h) * S)], fill=FILL)
+    body = Image.new("L", img.size, 0)
+    bd = ImageDraw.Draw(body)
+    bd.rounded_rectangle([x0 * S, y0 * S, x1 * S, y1 * S], radius=radius * S, fill=255)
+    bd.polygon([((tx - hw) * S, (y1 - 1.5 * u) * S), ((tx + hw) * S, (y1 - 1.5 * u) * S),
+                (tx * S, (y1 + tail_h) * S)], fill=255)
+    grad = _body_gradient(img.size, x0, y0, x1, y1, lift, S)
+    img.paste(grad, (0, 0), body)
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([x0 * S, y0 * S, x1 * S, y1 * S], radius=radius * S,
+                        outline=ORANGE, width=lw)
+    # Re-fill the tail over the border so the bottom edge opens into it.
+    tail = Image.new("L", img.size, 0)
+    ImageDraw.Draw(tail).polygon([((tx - hw) * S, (y1 - 1.5 * u) * S), ((tx + hw) * S, (y1 - 1.5 * u) * S),
+                                  (tx * S, (y1 + tail_h) * S)], fill=255)
+    img.paste(grad, (0, 0), tail)
     d.line([((tx - hw) * S, (y1 - 0.6 * u) * S), (tx * S, (y1 + tail_h) * S),
             ((tx + hw) * S, (y1 - 0.6 * u) * S)], fill=ORANGE, width=lw, joint="curve")
     inset = 4 * u

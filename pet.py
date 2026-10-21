@@ -1255,6 +1255,8 @@ class CrabPet:
         self._last_activity_ts = time.time()
         self._auto_clean_cooldown_until = 0.0
         self._shake_anim_active = False
+        self._feather_imgs = None      # rotated feather PhotoImages, built on first shake
+        self._feather_wins = []        # live feather-burst windows (kept on top)
         # Per-session "active grace": once a session has been seen actively
         # writing to its transcript, count it as still-working for a bit
         # longer so Claude's thinking pauses (and tool-call gaps) don't
@@ -1532,9 +1534,9 @@ class CrabPet:
         row.bind("<Button-3>", lambda e, k=key: self._on_pill_right_click(e, k))
         row.bind("<Double-Button-1>", lambda e, k=key: self._start_rename(k))
         row.bind("<Enter>", lambda _e, k=key, r=row: (
-            r.configure(bg=self._cs["hover"]), self._show_delete_for_pill(k)))
+            self._row_hover(r, True), self._show_delete_for_pill(k)))
         row.bind("<Leave>", lambda _e, r=row: (
-            r.configure(bg=self._cs["fill"]), self._hide_delete_soon()))
+            self._row_hover(r, False), self._hide_delete_soon()))
         return {"frame": row, "canvas": row, "sids": [], "dot": None}
 
     def _card_style(self):
@@ -1600,6 +1602,23 @@ class CrabPet:
         self._tail_x = cw // 2
         self._draw_card()
 
+    def _row_hover(self, row, on):
+        row.configure(bg=self._cs["hover" if on else "fill"])
+        if self._cs["name"] == "witch":       # gradient card: swap to the lighter slice
+            row.itemconfig("bg", image=self._card_img_hover if on else self._card_img)
+
+    def _paint_row_bgs(self):
+        """Gradient card: each row shows its exact slice of the card art behind
+        it, so the gradient runs seamlessly under the (opaque) row widgets."""
+        mx, mt = self._card_margin
+        for i, key in enumerate(sorted(self.pills)):
+            c = self.pills[key]["canvas"]
+            c.delete("bg")
+            if self._cs["name"] == "witch":
+                c.create_image(-(mx + self._cs["px"]), -(mt + self._cs["py"] + i * ROW_H),
+                               anchor="nw", image=self._card_img, tags="bg")
+                c.tag_lower("bg")
+
     def _draw_card(self):
         """Rounded card + a little tail at the bottom pointing at the pet."""
         c = self.card_canvas
@@ -1608,7 +1627,10 @@ class CrabPet:
         if self._cs["name"] == "witch":
             img, _ = halloween_art.card_chrome(cw, ch, self._tail_x, TAIL_W, TAIL_H,
                                                dp(14), UI_SCALE)
-            self._card_img = ImageTk.PhotoImage(img)        # keep a reference
+            hov, _ = halloween_art.card_chrome(cw, ch, self._tail_x, TAIL_W, TAIL_H,
+                                               dp(14), UI_SCALE, lift=14)
+            self._card_img = ImageTk.PhotoImage(img)        # keep references
+            self._card_img_hover = ImageTk.PhotoImage(hov)
             c.create_image(0, 0, anchor="nw", image=self._card_img, tags="card")
             self._canvas_size = img.size
         else:
@@ -1622,6 +1644,7 @@ class CrabPet:
             self._canvas_size = (cw, ch + TAIL_H)
         c.configure(width=self._canvas_size[0], height=self._canvas_size[1])
         c.tag_lower("card")
+        self._paint_row_bgs()
 
     def _pulse_tick(self):
         """Gently pulse the dot of every working row."""
@@ -1640,6 +1663,11 @@ class CrabPet:
         """Float the card just above the pet, its tail pointing down at it.
         Hidden while the permission bubble or usage panel shows."""
         if self.bubble_visible or self._usage_visible or not self.pills:
+            self._hide_pill_window()
+            return
+        # "Hide status card": just the pet, unless a session is waiting on Tian.
+        if not self.settings.get("show_card", True) and not any(
+                p.get("state") in ("attention", "permission") for p in self.pills.values()):
             self._hide_pill_window()
             return
         try:
@@ -1927,6 +1955,7 @@ class CrabPet:
                     prev_sign = sign
                 if reversals >= 3:
                     self._shake_clear_idle()
+                    self._feather_burst()
                     self._shake_pts.clear()
                     self._shake_cooldown_until = now + 1.5
 
@@ -1962,6 +1991,8 @@ class CrabPet:
         items = [
             ("Open Claude", self.focus_or_launch_claude),
             ("📊 Usage", self.toggle_usage_panel),
+            ("🙈 Hide status card" if self.settings.get("show_card", True) else "💬 Show status card",
+             self.toggle_card),
             ("🎉 Cheer", self._manual_cheer),
             char_item,
             *([("💻 Type on laptop", lambda: self._set_crow_work("laptop"))
@@ -2926,9 +2957,80 @@ class CrabPet:
                 self._anchor_center_x = base
                 self._reanchor()
                 self._shake_clear_idle()
+                self._feather_burst()
                 self._shake_anim_active = False
 
         step(0)
+
+    def _feather_burst(self):
+        """Shaking the crow knocks a few feathers loose. They pop out, then
+        sway and twirl down in their own transparent window that reaches well
+        past the pet's frame, so nothing gets clipped."""
+        if self.character != "crow" or crow_art is None:
+            return
+        if self._feather_imgs is None:
+            frames = crow_art.feather_frames(UI_SCALE)
+            self._feather_imgs = {sz: [ImageTk.PhotoImage(im) for im in lst]
+                                  for sz, lst in frames.items()}
+        n_ang = len(next(iter(self._feather_imgs.values())))
+        self.root.update_idletasks()
+        lw, lh = self.crab_label.winfo_width(), self.crab_label.winfo_height()
+        cx = self.root.winfo_x() + self.crab_label.winfo_x() + lw * 0.42
+        cy = self.root.winfo_y() + self.crab_label.winfo_y() + lh * 0.5
+        side, up, down = dp(160), dp(80), dp(260)
+        W, H = 2 * side, up + down
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        try:
+            win.attributes("-transparentcolor", TRANSPARENT_KEY)
+        except tk.TclError:
+            pass
+        win.configure(bg=TRANSPARENT_KEY)
+        win.geometry(f"{W}x{H}+{int(cx - side)}+{int(cy - up)}")
+        canvas = tk.Canvas(win, width=W, height=H, bg=TRANSPARENT_KEY, highlightthickness=0, bd=0)
+        canvas.pack()
+        feathers = []
+        for _ in range(8):
+            sz = random.choice(list(self._feather_imgs))
+            f = dict(x=side + random.uniform(-dp(20), dp(20)), y=up + random.uniform(-dp(16), dp(10)),
+                     vx=random.uniform(-dp(5), dp(5)), vy=random.uniform(-dp(6), -dp(2)),
+                     ph=random.uniform(0, 2 * math.pi), sway=random.uniform(dp(0.6), dp(1.4)),
+                     spin=random.uniform(0.7, 1.3), base=random.uniform(-40, 40),
+                     sz=sz, life=random.randint(60, 95))
+            f["item"] = canvas.create_image(f["x"], f["y"], image=self._feather_imgs[sz][0])
+            feathers.append(f)
+        self._feather_wins.append(win)
+
+        def tick(n):
+            if not win.winfo_exists():
+                return
+            t = n * 0.03
+            alive = 0
+            for f in feathers:
+                if f["item"] is None:
+                    continue
+                if n >= f["life"]:
+                    canvas.delete(f["item"])
+                    f["item"] = None
+                    continue
+                alive += 1
+                wobble = math.sin(t * 3.2 * f["spin"] + f["ph"])
+                f["vx"] *= 0.9                                        # air drag
+                f["vy"] = min(f["vy"] + dp(0.45), dp(1.7))           # settle to a slow fall
+                f["x"] += f["vx"] + wobble * f["sway"]
+                f["y"] += f["vy"]
+                ang = f["base"] + 38 * math.sin(t * 3.2 * f["spin"] + f["ph"] + 1.2)
+                img = self._feather_imgs[f["sz"]][int(round((ang % 360) / (360 / n_ang))) % n_ang]
+                canvas.coords(f["item"], f["x"], f["y"])
+                canvas.itemconfig(f["item"], image=img)
+            if alive:
+                win.after(30, tick, n + 1)
+            else:
+                self._feather_wins.remove(win)
+                win.destroy()
+
+        tick(0)
 
     def _shake_clear_idle(self):
         """Dismiss every pill whose sessions are all idle/finished/ready.
@@ -2956,6 +3058,7 @@ class CrabPet:
         def flash(color, then_ms, after_fn):
             try:
                 if row.winfo_exists():
+                    row.itemconfig("bg", state="hidden")
                     row.configure(bg=color)
             except tk.TclError:
                 pass
@@ -2986,6 +3089,14 @@ class CrabPet:
         # Audible confirmation so Tian knows it took.
         if self.settings["chime"]:
             play_chime("cheer")
+
+    def toggle_card(self):
+        """Show or hide the session card above the pet (it still pops up
+        when a session needs you)."""
+        self.settings["show_card"] = not self.settings.get("show_card", True)
+        save_settings(self.settings)
+        self._update_pill_window()
+        self.show_toast("Status card on" if self.settings["show_card"] else "Just the pet")
 
     def toggle_clamp_y(self):
         """Toggle the Y-clamp that keeps the crab above the Windows taskbar."""
@@ -3411,6 +3522,12 @@ class CrabPet:
             bump(menu)
 
         # The rename entry box must stay above the crab while it's open.
+        for fw in getattr(self, "_feather_wins", []):
+            try:
+                bump(fw)
+            except Exception:
+                pass
+
         rename = getattr(self, "_rename_window", None)
         if rename is not None:
             try:
