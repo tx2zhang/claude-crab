@@ -2441,6 +2441,7 @@ class CrabPet:
             work = self._crow_work_anim()
             self.typing_tks = photos(work)
             self.sleeping_tks = photos("sleeping")
+            self.settle_tks = photos("settle") if "settle" in frames else None
             self.cheer_tks = photos("cheer")
             self.dangle_tks = photos("dangle")
             self.hop_tks = photos("hop")
@@ -2453,6 +2454,7 @@ class CrabPet:
             self.typing_tks = [ImageTk.PhotoImage(crab_image(f)) for f in TYPING_FRAMES]
             self.cheer_tks = [ImageTk.PhotoImage(crab_image(f)) for f in CHEER_FRAMES]
             self.hop_tks = [ImageTk.PhotoImage(crab_image(f)) for f in HOP_FRAMES]
+            self.settle_tks = None
             self.sleeping_tks = [
                 ImageTk.PhotoImage(crab_image(SLEEPING_BODY, zs=zs))
                 for zs in SLEEPING_Z_FRAMES
@@ -3199,13 +3201,21 @@ class CrabPet:
             # Crab: static stance. Crow: animated alert idle (looks around).
             self._play("standing", self.standing_tks, iv["standing"])
         else:
-            # Sleeping with the new cap + Zzz — the idle state.
-            self._play("sleeping", self.sleeping_tks, iv["sleeping"])
+            # Sleeping with the new cap + Zzz — the idle state. The crow first
+            # winds down (yawn, nest, tuck in, cap) once, then breathes.
+            settle = getattr(self, "settle_tks", None)
+            if settle and self._current_anim not in ("sleeping", "settle"):
+                self._play("settle", settle, iv["settle"], once=True)
+            elif self._current_anim != "settle" or self._anim_done:
+                self._play("sleeping", self.sleeping_tks, iv["sleeping"])
 
-    def _play(self, name, frames, interval_ms):
+    def _play(self, name, frames, interval_ms, once=False):
+        """Loop `frames`; once=True plays them a single time and holds the
+        last frame (self._anim_done turns True when it gets there)."""
         if name == self._current_anim:
             return
         self._current_anim = name
+        self._anim_once, self._anim_done = once, False
         if self._anim_after is not None:
             self.root.after_cancel(self._anim_after)
             self._anim_after = None
@@ -3223,6 +3233,11 @@ class CrabPet:
 
     def _tick_anim(self):
         self.crab_label.config(image=self._anim_frames[self._anim_idx])
+        if getattr(self, "_anim_once", False) and self._anim_idx == len(self._anim_frames) - 1:
+            self._anim_done = True                # hold the last frame
+            self._anim_after = None
+            self.update_animation()
+            return
         self._anim_idx = (self._anim_idx + 1) % len(self._anim_frames)
         self._anim_after = self.root.after(self._anim_interval, self._tick_anim)
 

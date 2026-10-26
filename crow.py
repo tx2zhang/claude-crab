@@ -333,7 +333,8 @@ def pose(**kw):
              eye="open", look=(0.0, 0.0), beak=0.0,
              legs="stand", leg_swing=0.0,
              laptop=False, key=None, scroll=0.0,
-             nest=False, cap=False, cap_sway=0.0, zzz=None, confetti=None,
+             nest=False, nest_k=1.0, cap=False, cap_sway=0.0, cap_drop=0.0,
+             zzz=None, confetti=None,
              k=1.0, perch=None, hat=False, cauldron=None)
     p.update(kw)
     return p
@@ -406,6 +407,11 @@ def _eye(pt, Hd, state, look):
         px, py = c[0] + 1.1 + look[0], c[1] + 0.5 + look[1]
         pt.poly(tf(Hd, ell(px, py, pr, pr)), PUPIL)
         pt.poly(tf(Hd, ell(px + 1.15, py - 1.35, 1.15, 1.15)), (255, 255, 255))
+    elif state == "sleepy":                 # heavy lid: half-open, pupil sunk low
+        pt.poly(tf(Hd, ell(c[0], c[1] + 1.6, 5.2, 3.0)), EYE_W)
+        px = c[0] + 1.1 + look[0]
+        pt.poly(tf(Hd, ell(px, c[1] + 2.1, 2.2, 2.2)), PUPIL)
+        pt.line(tf(Hd, qbez((62.4, 37.6), (67.5, 35.0), (72.6, 37.6))), LID, 1.5)
     elif state == "closed":
         pt.line(tf(Hd, qbez((62.6, 37.2), (67.5, 41.4), (72.4, 37.2))), LID, 1.5)
     elif state == "happy":
@@ -438,17 +444,24 @@ def _cap(pt, Hd, sway):
     pt.poly(tf(Hd, ell(pom[0], pom[1], 3.7, 3.7)), CAP_BAND)
 
 
-def _nest_back(pt):
-    pt.gradient([ell(44, 76.6, 31.5, 7.2)], NEST_TOP, NEST_BOT)
-    pt.poly(ell(44, 77.6, 28.0, 5.0), NEST_IN)
+def _nest_m(nk):
+    """Nest transform: nk < 1 shrinks it toward the floor so it can grow in."""
+    return S(nk, nk, 44.0, GROUND - 2)
 
 
-def _nest_front(pt):
+def _nest_back(pt, nk=1.0):
+    m = _nest_m(nk)
+    pt.gradient([tf(m, ell(44, 76.6, 31.5, 7.2))], NEST_TOP, NEST_BOT)
+    pt.poly(tf(m, ell(44, 77.6, 28.0, 5.0)), NEST_IN)
+
+
+def _nest_front(pt, nk=1.0):
+    m, lw = _nest_m(nk), max(0.3, nk)
     rim = [(44 + 31.5 * math.cos(t), 76.6 + 7.2 * math.sin(t))
            for t in (math.pi * i / 30 for i in range(31))]
     bowl = [(44 + 33.5 * math.cos(t), 79.0 + 12.0 * math.sin(t))
             for t in (math.pi - math.pi * i / 30 for i in range(31))]
-    pt.gradient([rim + bowl], NEST_TOP, NEST_BOT)
+    pt.gradient([tf(m, rim + bowl)], NEST_TOP, NEST_BOT)
     rng = random.Random(11)
     for _ in range(30):
         x = rng.uniform(15, 71)
@@ -461,11 +474,11 @@ def _nest_front(pt):
         y = rng.uniform(top, bot)
         dx = rng.uniform(7, 13) * rng.choice((-1, 1))
         dy = rng.uniform(-1.6, 1.6)
-        pt.line(qbez((x, y), (x + dx / 2, y + dy - 1.2), (x + dx, y + dy)),
-                rng.choice(TWIGS), rng.uniform(0.7, 1.1))
+        pt.line(tf(m, qbez((x, y), (x + dx / 2, y + dy - 1.2), (x + dx, y + dy))),
+                rng.choice(TWIGS), rng.uniform(0.7, 1.1) * lw)
     for (x0, y0), (x1, y1) in (((15, 77), (7, 73)), ((18, 79), (10, 80.5)),
                                ((72, 76.5), (81, 72.5)), ((70, 79.5), (79, 81))):
-        pt.line([(x0, y0), (x1, y1)], TWIGS[1], 0.9)
+        pt.line(tf(m, [(x0, y0), (x1, y1)]), TWIGS[1], 0.9 * lw)
 
 
 KEY_ROWS, KEY_COLS = 3, 9
@@ -785,7 +798,7 @@ def draw_crow(P):
     if P["laptop"]:
         _laptop(pt, P)
     if P["nest"]:
-        _nest_back(pt)
+        _nest_back(pt, P["nest_k"])
     C = P["cauldron"]
     if C is not None:
         _cauldron_back(pt, C)
@@ -812,12 +825,12 @@ def draw_crow(P):
     pt.sheen(tf(Hd, ell(58.0, 31.5, 8.0, 3.8, -25)), SHEEN + (85,), blur=1.5)
 
     if P["nest"]:
-        _nest_front(pt)
+        _nest_front(pt, P["nest_k"])
     _wing(pt, Wn, P["spread"])
     _beak(pt, Hd, P["beak"])
     _eye(pt, Hd, P["eye"], P["look"])
     if P["cap"]:
-        _cap(pt, Hd, P["cap_sway"])
+        _cap(pt, chain(Hd, T(0, -P["cap_drop"])), P["cap_sway"])
     if P["hat"]:
         _hat(pt, Hd)
     pt.lw = 1.0
@@ -959,6 +972,43 @@ def anim_sleeping(n=36):
     return out
 
 
+def anim_settle(n=46):
+    """One-shot wind-down into the sleeping loop: a big yawn and stretch,
+    the nest grows in under it, it sinks in with heavy eyes and tucks its
+    head, the nightcap drops on with a little bounce, one cosy wiggle.
+    The last frame is the sleeping loop's first, so the hand-off is seamless."""
+    out = []
+    for f in range(n):
+        t = f / (n - 1)
+        yawn = kf(t, [(0, 0), (0.06, 0), (0.16, 0.8), (0.26, 0.8), (0.34, 0), (1, 0)])
+        stretch = kf(t, [(0, 0), (0.08, 0), (0.18, 1), (0.28, 1), (0.36, 0), (1, 0)])
+        nk = kf(t, [(0, 0), (0.2, 0), (0.36, 1.06), (0.42, 1.0), (1, 1.0)])
+        sink = kf(t, [(0, 0), (0.36, 0), (0.62, 1), (1, 1)])
+        drop = kf(t, [(0, 22), (0.66, 22), (0.78, 0), (0.83, 2.2), (0.88, 0), (1, 0)])
+        wig = math.sin(math.pi * max(0.0, (t - 0.86) / 0.14) * 2) * (1 - ease((t - 0.86) / 0.14)) \
+            if t > 0.86 else 0.0
+        if 0.08 <= t < 0.34:
+            eye = "closed"                      # eyes squeezed shut for the yawn
+        elif t < 0.4:
+            eye = "open"
+        elif t < 0.58:
+            eye = "sleepy"
+        else:
+            eye = "closed"
+        out.append(pose(
+            nest=t >= 0.2, nest_k=max(0.02, nk),
+            legs="stand" if sink < 0.45 else "none",
+            by=11 * sink + 0.6 * wig, rot=1.2 * wig,
+            sy=1.0 + 0.04 * stretch - 0.04 * math.sin(math.pi * sink) + 0.015 * wig,
+            sx=1.0 - 0.015 * stretch + 0.03 * math.sin(math.pi * sink),
+            head_rot=-14 * stretch + 22 * sink, head_dy=6 * sink, head_dx=-2 * sink,
+            beak=yawn, eye=eye, look=(0.4, 0.8 * sink),
+            wing=1.5 + 14 * stretch - 3.5 * sink, spread=0.25 * stretch,
+            tail=4 * stretch + 10 * sink,
+            cap=t >= 0.66, cap_drop=drop, cap_sway=4 * min(1.0, max(0.0, (t - 0.8) / 0.2))))
+    return out
+
+
 def anim_cheer(n=16):
     """Hop + flap + caw with happy eyes and confetti."""
     out = []
@@ -1071,6 +1121,7 @@ BUILDERS = {
     "typing": anim_typing,
     "brewing": anim_brewing,
     "sleeping": anim_sleeping,
+    "settle": anim_settle,
     "cheer": anim_cheer,
     "dangle": anim_dangle,
     "hop": anim_hop,
@@ -1081,6 +1132,7 @@ INTERVALS = {
     "typing": 65,
     "brewing": 80,
     "sleeping": 90,
+    "settle": 70,
     "cheer": 60,
     "dangle": 45,
     "hop": 50,
