@@ -249,7 +249,7 @@ TAG_BG = "#2b2b30"
 TAG_FG = "#f0f0f0"
 
 # Apple-style "frosted glass" look for the popup notifications (permission
-# bubble, MCP reauth, toast, mood blurb): a cool translucent card with a
+# bubble, toast, mood blurb): a cool translucent card with a
 # hairline light edge, a bright top sheen, rounded corners, and real
 # window translucency.
 GLASS_FILL   = "#1e2026"   # frosted dark slate (card body)
@@ -1311,14 +1311,6 @@ class CrabPet:
 
         # Track previous "pending" state for chime trigger on permission popup.
         self._prev_pending = False
-
-        # MCP reauth bubble — pops when ~/.claude/mcp-needs-auth-cache.json
-        # gets a new entry / a timestamp bump for an existing one.
-        self._mcp_auth_file = Path.home() / ".claude" / "mcp-needs-auth-cache.json"
-        self._mcp_seen_ts = self._snapshot_mcp_cache()
-        self._mcp_visible = False
-        self._mcp_current_server = None
-        self._build_mcp_bubble()
 
         # Usage panel (click the pet). Stats come from local transcripts;
         # warm the index in the background so the first click is instant.
@@ -2720,135 +2712,6 @@ class CrabPet:
         except Exception:
             pass
 
-    # ---------- MCP reauth bubble ----------
-
-    def _snapshot_mcp_cache(self):
-        """Record current timestamps so we don't pop bubbles for entries that
-        were already in the cache when the pet started."""
-        seen = {}
-        try:
-            if self._mcp_auth_file.exists():
-                data = json.loads(self._mcp_auth_file.read_text())
-                if isinstance(data, dict):
-                    for name, info in data.items():
-                        if isinstance(info, dict):
-                            seen[name] = info.get("timestamp", 0)
-        except Exception:
-            pass
-        return seen
-
-    def _build_mcp_bubble(self):
-        """A persistent floating glass bubble: 'X needs reauth' + Reauth /
-        Dismiss."""
-        self.mcp_window = tk.Toplevel(self.root)
-        self.mcp_window.overrideredirect(True)
-        self.mcp_window.attributes("-topmost", True)
-        try:
-            self.mcp_window.attributes("-transparentcolor", TRANSPARENT_KEY)
-            self.mcp_window.attributes("-alpha", GLASS_ALPHA)
-        except tk.TclError:
-            pass
-        self.mcp_window.configure(bg=TRANSPARENT_KEY)
-
-        self.mcp_canvas, inner = self._glass_wrap(self.mcp_window)
-        self.mcp_canvas.pack()
-
-        tk.Label(
-            inner, text="🔑", bg=GLASS_FILL, fg=GLASS_FG,
-            font=("Segoe UI Emoji", 15),
-        ).pack()
-
-        self.mcp_title_label = tk.Label(
-            inner, text="MCP needs reauth",
-            bg=GLASS_FILL, fg=GLASS_FG, font=(GLASS_FONT_MED, 10),
-        )
-        self.mcp_title_label.pack(pady=(dp(3), dp(10)))
-
-        btn_row = tk.Frame(inner, bg=GLASS_FILL)
-        btn_row.pack()
-        self._glass_button(btn_row, "Reauth", "#30d158", "#43dd68",
-                           self._mcp_reauth_clicked).pack(side="left", padx=(0, dp(6)))
-        self._glass_button(btn_row, "Dismiss", "#48484a", "#5a5a5c",
-                           self._mcp_dismiss_clicked).pack(side="left")
-
-        self._glass_refit(self.mcp_canvas, inner)
-        self.mcp_window.withdraw()
-
-    def _check_mcp_reauth(self):
-        """Look for new or updated entries in the MCP auth cache and pop the
-        bubble for the first one we haven't shown yet."""
-        if self._mcp_visible:
-            return
-        try:
-            if not self._mcp_auth_file.exists():
-                return
-            data = json.loads(self._mcp_auth_file.read_text())
-            if not isinstance(data, dict):
-                return
-        except Exception:
-            return
-        for name, info in data.items():
-            if not isinstance(info, dict):
-                continue
-            ts = info.get("timestamp", 0)
-            if ts > self._mcp_seen_ts.get(name, 0):
-                self._mcp_seen_ts[name] = ts
-                self._show_mcp_bubble(name)
-                return
-
-    def _show_mcp_bubble(self, server_name):
-        # Trim the "claude.ai " prefix so the title is just the server name.
-        display = server_name
-        if display.startswith("claude.ai "):
-            display = display[len("claude.ai "):]
-        self._mcp_current_server = server_name
-        self.mcp_title_label.config(text=f"{display} needs reauth")
-        self._glass_refit(self.mcp_canvas, self.mcp_title_label.master)
-        self._update_mcp_position()
-        self.mcp_window.deiconify()
-        self.mcp_window.attributes("-topmost", True)
-        self._mcp_visible = True
-        if self.settings.get("chime"):
-            play_chime("attention")
-
-    def _update_mcp_position(self):
-        """Pin the MCP bubble flush to the LEFT of the crab, vertically
-        centered. Called both on show and on every topmost tick so it follows
-        the crab as you drag."""
-        try:
-            self.root.update_idletasks()
-            crab_x = self.root.winfo_x() + self.crab_label.winfo_x()
-            crab_y = self.root.winfo_y() + self.crab_label.winfo_y()
-            crab_h = self.crab_label.winfo_height()
-            self.mcp_window.update_idletasks()
-            mw = self.mcp_window.winfo_reqwidth()
-            mh = self.mcp_window.winfo_reqheight()
-            # Overlap the crab's left edge by 14px so the bubble visually
-            # "connects" to the body (mirrors the emote on the right).
-            ex = crab_x - mw + dp(14)
-            ey = crab_y + (crab_h - mh) // 2
-            self.mcp_window.geometry(f"+{ex}+{ey}")
-        except Exception:
-            pass
-
-    def _hide_mcp_bubble(self):
-        if self._mcp_visible:
-            try:
-                self.mcp_window.withdraw()
-            except Exception:
-                pass
-            self._mcp_visible = False
-        self._mcp_current_server = None
-
-    def _mcp_reauth_clicked(self):
-        self._hide_mcp_bubble()
-        self.focus_or_launch_claude()
-        self.show_toast("Run /mcp in Claude to reauth")
-
-    def _mcp_dismiss_clicked(self):
-        # Seen-ts is already updated so the same timestamp won't re-pop.
-        self._hide_mcp_bubble()
-
     def _build_emote_window(self):
         """Create the floating side-bubble window for the mood emoji."""
         self.emote_window = tk.Toplevel(self.root)
@@ -3507,9 +3370,6 @@ class CrabPet:
             play_chime("attention")
         self._prev_pending = pending_now
 
-        # MCP server needs reauth?
-        self._check_mcp_reauth()
-
         self.update_animation()
         self._reanchor()
         self._update_pill_window()
@@ -3569,8 +3429,6 @@ class CrabPet:
             bump(self.emote_window)
         if getattr(self, "_delete_visible", False):
             bump(self.delete_window)
-        if getattr(self, "_mcp_visible", False):
-            bump(self.mcp_window)
         toast = getattr(self, "_toast_window", None)
         if toast is not None:
             try:
@@ -3609,8 +3467,6 @@ class CrabPet:
             self._update_usage_position()
         if self._emote_visible:
             self._update_emote_position()
-        if self._mcp_visible:
-            self._update_mcp_position()
         self.root.after(40, self._topmost_loop)
 
     def run(self):
